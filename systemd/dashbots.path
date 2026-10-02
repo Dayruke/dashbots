@@ -1,0 +1,8 @@
+[Unit]
+Description=Start Dashbots while its toggle flag exists
+
+[Path]
+PathExists=%h/.local/state/omarchy/toggles/dashbots
+
+[Install]
+WantedBy=default.target

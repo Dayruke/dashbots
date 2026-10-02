@@ -1,0 +1,8 @@
+[Unit]
+Description=Dashbots session watcher
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dashbots watch
+Restart=on-failure
+RestartSec=1

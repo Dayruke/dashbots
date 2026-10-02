@@ -1,0 +1,1337 @@
+#!/usr/bin/env python3
+"""Dashbots reporter. One record shape, every harness.
+
+Hooks must exit 0 and stay quiet on stdout. The Gemini adapter prints {}
+itself. Debug goes to stderr only when DASHBOTS_DEBUG is set.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from datetime import datetime, timezone
+
+ADDR_RE = re.compile(r"^0x[0-9a-fA-F]+$")
+ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+HARNESS_RE = re.compile(r"[a-z0-9_-]{1,32}")
+STATUSES = ("alive", "working", "waiting", "error")
+ADAPTERS = ("grok", "claude", "gemini")
+SCAN_NAMES = ("grok", "claude", "gemini", "agy", "codex", "opencode")
+
+SNAKE_EVENTS = {
+    "session_start": "SessionStart",
+    "session_end": "SessionEnd",
+    "user_prompt_submit": "UserPromptSubmit",
+    "pre_tool_use": "PreToolUse",
+    "post_tool_use": "PostToolUse",
+    "post_tool_use_failure": "PostToolUseFailure",
+    "stop": "Stop",
+    "stop_failure": "StopFailure",
+    "stop_cancelled": "StopCancelled",
+    "notification": "Notification",
+    "before_agent": "BeforeAgent",
+    "after_agent": "AfterAgent",
+    "before_tool": "BeforeTool",
+    "after_tool": "AfterTool",
+    "before_model": "BeforeModel",
+    "after_model": "AfterModel",
+}
+
+GROK_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "StopCancelled",
+    "Notification",
+    "SessionEnd",
+)
+GEMINI_EVENTS = (
+    "SessionStart",
+    "BeforeAgent",
+    "BeforeTool",
+    "BeforeModel",
+    "AfterTool",
+    "AfterModel",
+    "AfterAgent",
+    "Notification",
+    "SessionEnd",
+)
+NEW_TURN_EVENTS = {"UserPromptSubmit", "BeforeAgent"}
+STOP_EVENTS = {"Stop", "StopCancelled", "AfterAgent"}
+
+
+def debug(msg):
+    if os.environ.get("DASHBOTS_DEBUG"):
+        print(msg, file=sys.stderr)
+
+
+def repo_root():
+    here = os.path.realpath(os.path.abspath(__file__))
+    return os.path.dirname(os.path.dirname(here))
+
+
+def home():
+    return os.path.expanduser("~")
+
+
+def state_root():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(home(), ".local", "state")
+    return os.path.join(base, "dashbots")
+
+
+def sessions_dir():
+    return os.path.join(state_root(), "sessions")
+
+
+def adapters_dir():
+    return os.path.join(state_root(), "adapters")
+
+
+def toggle_path():
+    override = os.environ.get("DASHBOTS_TOGGLE_FILE")
+    if override:
+        return override
+    return os.path.join(home(), ".local", "state", "omarchy", "toggles", "dashbots")
+
+
+def toggle_on():
+    return os.path.isfile(toggle_path())
+
+
+def bin_path():
+    return os.path.join(home(), ".local", "bin", "dashbots")
+
+
+def lib_dir():
+    return os.path.join(home(), ".local", "lib", "dashbots")
+
+
+def plugin_dir():
+    return os.path.join(home(), ".config", "omarchy", "plugins", "dashbots")
+
+
+def shell_json_path():
+    return os.path.join(home(), ".config", "omarchy", "shell.json")
+
+
+def systemd_user_dir():
+    return os.path.join(home(), ".config", "systemd", "user")
+
+
+def now_stamp():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ensure_private_dir(path):
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def sanitize_id(value):
+    text = str(value or "")
+    if not text or text in (".", "..") or "/" in text or "\\" in text:
+        return ""
+    if not ID_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def sanitize_harness(value):
+    text = str(value or "").strip().lower()
+    if HARNESS_RE.fullmatch(text):
+        return text
+    return ""
+
+
+def session_path(session_id):
+    return os.path.join(sessions_dir(), session_id + ".json")
+
+
+def read_record(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def write_record(record):
+    session_id = sanitize_id(record.get("id"))
+    if not session_id:
+        return
+    record = dict(record)
+    record["id"] = session_id
+    record["updated_at"] = now_stamp()
+    ensure_private_dir(sessions_dir())
+    destination = session_path(session_id)
+    fd, tmp = tempfile.mkstemp(dir=sessions_dir(), prefix=".tmp-")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, destination)
+        os.chmod(destination, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def delete_record(session_id):
+    session_id = sanitize_id(session_id)
+    if not session_id:
+        return
+    try:
+        os.remove(session_path(session_id))
+    except FileNotFoundError:
+        pass
+
+
+def iter_records():
+    directory = sessions_dir()
+    if not os.path.isdir(directory):
+        return
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        record = read_record(os.path.join(directory, name))
+        if record:
+            yield record
+
+
+def field(payload, *keys, default=""):
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return default
+
+
+def event_name(payload):
+    raw = str(field(payload, "hook_event_name", "hookEventName", default="") or "")
+    return SNAKE_EVENTS.get(raw, raw)
+
+
+def cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return []
+    parts = []
+    for piece in raw.split(b"\0"):
+        if piece:
+            parts.append(piece.decode("utf-8", "replace"))
+    return parts
+
+
+def comm_of(pid):
+    try:
+        with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def ppid_of(pid):
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+    return 0
+
+
+def pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("State:"):
+                    state = line.split()[1] if len(line.split()) > 1 else ""
+                    return state != "Z"
+    except OSError:
+        return False
+    return False
+
+
+def is_helper(args):
+    for arg in args:
+        base = os.path.basename(arg)
+        if base == "dashbots" or arg.endswith("/bin/dashbots"):
+            return True
+        if "/lib/dashbots/" in arg or "/dashbots/adapters/" in arg:
+            return True
+    return False
+
+
+def classify_args(args, comm):
+    """Return a scan harness name, or None. Helpers are not harnesses."""
+    args = list(args or [])
+    comm = str(comm or "")
+    if not args and not comm:
+        return None
+    if args and is_helper(args):
+        return None
+    base = os.path.basename(args[0]) if args else comm
+    if base in ("node", "nodejs") or comm in ("node", "nodejs"):
+        for arg in args[1:]:
+            name = os.path.basename(arg)
+            if name in ("gemini", "gemini.js"):
+                return "gemini"
+        return None
+    if base in SCAN_NAMES:
+        return base
+    if comm in SCAN_NAMES:
+        return comm
+    return None
+
+
+def harness_of(pid):
+    return classify_args(cmdline(pid), comm_of(pid))
+
+
+def find_ancestor(harness, start_pid):
+    pid = start_pid
+    seen = set()
+    while pid and pid > 1 and pid not in seen and len(seen) < 40:
+        seen.add(pid)
+        if harness_of(pid) == harness:
+            return pid
+        pid = ppid_of(pid)
+    return None
+
+
+def hook_pid(harness):
+    if os.environ.get("DASHBOTS_HOOK_ASSUME") == "1":
+        raw = os.environ.get("DASHBOTS_HOOK_PID") or str(os.getpid())
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return find_ancestor(harness, os.getppid())
+
+
+def iter_pids():
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return
+    for name in names:
+        if name.isdigit():
+            yield int(name)
+
+
+def hypr_clients():
+    try:
+        result = subprocess.run(
+            ["hyprctl", "clients", "-j"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def window_for(pid, clients=None):
+    if clients is None:
+        clients = hypr_clients()
+    by_pid = {}
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        try:
+            client_pid = int(client.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        address = str(client.get("address") or "")
+        if client_pid > 0 and ADDR_RE.fullmatch(address):
+            by_pid[client_pid] = address
+    seen = set()
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    while pid and pid > 1 and pid not in seen and len(seen) < 40:
+        seen.add(pid)
+        if pid in by_pid:
+            return by_pid[pid]
+        pid = ppid_of(pid)
+    return ""
+
+
+def cwd_of(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+def title_of(cwd, harness):
+    text = str(cwd or "").rstrip("/")
+    base = os.path.basename(text) if text else ""
+    return (base or harness or "agent")[:80]
+
+
+def first_line(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.splitlines()[0][:160]
+
+
+def prompt_text(payload):
+    raw = field(payload, "prompt", "userPrompt", "user_prompt", "message", default="")
+    if isinstance(raw, dict):
+        raw = raw.get("text") or raw.get("content") or ""
+    return first_line(raw)
+
+
+def tool_name(payload):
+    return first_line(field(payload, "toolName", "tool_name", default=""))
+
+
+def prompt_id(payload):
+    return str(field(payload, "promptId", "prompt_id", default="") or "")
+
+
+def session_id_of(payload):
+    for key in ("sessionId", "session_id"):
+        found = sanitize_id(payload.get(key))
+        if found:
+            return found
+    return sanitize_id(os.environ.get("GEMINI_SESSION_ID", ""))
+
+
+def is_subagent(payload):
+    return bool(field(payload, "subagentType", "subagent_type", default=""))
+
+
+def payload_has_error(payload):
+    if payload.get("error") or payload.get("is_error") or payload.get("isError"):
+        return True
+    for key in ("tool_response", "toolResponse", "toolResult", "tool_result"):
+        value = payload.get(key)
+        if isinstance(value, dict) and value.get("error"):
+            return True
+        if isinstance(value, dict):
+            for exit_key in ("exitCode", "exit_code"):
+                if exit_key in value and value[exit_key] not in (0, "0", None):
+                    return True
+    for exit_key in ("exitCode", "exit_code"):
+        if exit_key in payload and payload[exit_key] not in (0, "0", None):
+            return True
+    return False
+
+
+def notification_type(payload):
+    return str(field(payload, "notificationType", "notification_type", default="") or "")
+
+
+def blank_record(session_id, harness, pid, cwd):
+    return {
+        "id": session_id,
+        "harness": harness,
+        "pid": int(pid),
+        "cwd": cwd or "",
+        "title": title_of(cwd, harness),
+        "status": "alive",
+        "window": "",
+        "updated_at": now_stamp(),
+        "activity": "",
+        "source": "hook",
+        "turn": "",
+    }
+
+
+def load_or_blank(session_id, harness, pid, cwd):
+    current = read_record(session_path(session_id))
+    if not current:
+        return blank_record(session_id, harness, pid, cwd)
+    current["harness"] = harness
+    current["pid"] = int(pid)
+    if cwd:
+        current["cwd"] = cwd
+        if not current.get("title"):
+            current["title"] = title_of(cwd, harness)
+    current["source"] = "hook"
+    current.setdefault("activity", "")
+    current.setdefault("turn", "")
+    current.setdefault("window", "")
+    current.setdefault("status", "alive")
+    return current
+
+
+def stale_turn(record, event_turn):
+    """A late event for an older prompt must not clobber the new turn."""
+    if not event_turn:
+        return False
+    stored = str(record.get("turn") or "")
+    if not stored:
+        return False
+    return event_turn != stored
+
+
+def delete_scan_twin(pid):
+    directory = sessions_dir()
+    if not os.path.isdir(directory):
+        return
+    suffix = f"-{int(pid)}.json"
+    for name in os.listdir(directory):
+        if name.startswith("scan-") and name.endswith(suffix):
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
+
+
+def apply_hook(payload, harness):
+    """Apply one hook payload. Always meant to be followed by exit 0."""
+    if not isinstance(payload, dict):
+        return 0
+    harness = sanitize_harness(harness)
+    if harness not in ADAPTERS:
+        return 0
+    if not toggle_on():
+        return 0
+    if is_subagent(payload):
+        return 0
+    pid = hook_pid(harness)
+    if not pid:
+        return 0
+    session_id = session_id_of(payload)
+    name = event_name(payload)
+    if name == "SessionEnd":
+        if session_id:
+            delete_record(session_id)
+        return 0
+    if not session_id or not name:
+        return 0
+
+    cwd = str(field(payload, "cwd", "workspaceRoot", "workspace_root", default="") or "")
+    record = load_or_blank(session_id, harness, pid, cwd)
+    turn = prompt_id(payload)
+    # Stop carries the turn guard. A notification describes the session now,
+    # including an idle ping that has no prompt id.
+    if name not in NEW_TURN_EVENTS | {"Notification", "SessionStart"} and stale_turn(record, turn):
+        return 0
+
+    window = window_for(pid)
+    if window:
+        record["window"] = window
+    elif "window" not in record:
+        record["window"] = ""
+
+    if name == "SessionStart":
+        record["status"] = "alive"
+        record["activity"] = "started"
+        record["title"] = title_of(record.get("cwd"), harness)
+        record["turn"] = ""
+    elif name in NEW_TURN_EVENTS:
+        record["status"] = "working"
+        record["turn"] = turn
+        activity = prompt_text(payload)
+        record["activity"] = activity or "working"
+    elif name in ("PreToolUse", "BeforeTool", "BeforeModel"):
+        record["status"] = "working"
+        if turn:
+            record["turn"] = turn
+        named = tool_name(payload)
+        record["activity"] = named or ("thinking" if name == "BeforeModel" else record.get("activity") or "working")
+    elif name == "AfterModel":
+        record["status"] = "working"
+        if turn:
+            record["turn"] = turn
+    elif name in ("PostToolUse", "AfterTool"):
+        if turn:
+            record["turn"] = turn
+        if payload_has_error(payload):
+            record["status"] = "error"
+            named = tool_name(payload)
+            record["activity"] = named or "error"
+        else:
+            record["status"] = "working"
+            named = tool_name(payload)
+            if named:
+                record["activity"] = named
+    elif name == "PostToolUseFailure":
+        record["status"] = "error"
+        if turn:
+            record["turn"] = turn
+        named = tool_name(payload)
+        record["activity"] = named or "error"
+    elif name in STOP_EVENTS:
+        record["status"] = "waiting"
+        record["activity"] = record.get("activity") or "waiting"
+    elif name == "StopFailure":
+        record["status"] = "error"
+        record["activity"] = "error"
+    elif name == "Notification":
+        kind = notification_type(payload)
+        if kind == "idle_prompt":
+            record["status"] = "waiting"
+            record["activity"] = "idle"
+        elif kind in ("permission_prompt", "elicitation_dialog", "ToolPermission"):
+            record["status"] = "waiting"
+            record["activity"] = "needs a decision"
+        else:
+            return 0
+    else:
+        return 0
+
+    if record.get("status") not in STATUSES:
+        return 0
+    delete_scan_twin(pid)
+    write_record(record)
+    return 0
+
+
+def live_records():
+    found = []
+    for record in iter_records():
+        if pid_alive(record.get("pid")):
+            found.append(record)
+    found.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return found
+
+
+def cmd_list(_argv=None):
+    print(json.dumps(live_records(), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def cmd_clear(argv):
+    if "--all" in argv:
+        directory = sessions_dir()
+        if os.path.isdir(directory):
+            for name in os.listdir(directory):
+                if name.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(directory, name))
+                    except OSError:
+                        pass
+        return 0
+    target = ""
+    if "--id" in argv:
+        target = flag_value(argv, "--id") or ""
+    elif len(argv) > 1 and not str(argv[1]).startswith("-"):
+        target = argv[1]
+    session_id = sanitize_id(target)
+    if not session_id:
+        print("dashbots clear needs a session id, or --all", file=sys.stderr)
+        return 2
+    delete_record(session_id)
+    return 0
+
+
+def cmd_gc(_argv=None):
+    directory = sessions_dir()
+    if not os.path.isdir(directory):
+        return 0
+    for record in list(iter_records()):
+        session_id = sanitize_id(record.get("id"))
+        if not session_id:
+            continue
+        drop = not pid_alive(record.get("pid"))
+        if record.get("source") == "scan" and has_marker(record.get("harness")):
+            drop = True
+        if drop:
+            delete_record(session_id)
+    return 0
+
+
+def has_marker(harness):
+    harness = sanitize_harness(harness)
+    if not harness:
+        return False
+    return os.path.isfile(os.path.join(adapters_dir(), harness))
+
+
+def cmd_scan(_argv=None):
+    if not toggle_on():
+        return 0
+    clients = hypr_clients()
+    for pid in iter_pids():
+        harness = harness_of(pid)
+        if not harness or has_marker(harness) or not pid_alive(pid):
+            continue
+        cwd = cwd_of(pid)
+        session_id = sanitize_id(f"scan-{harness}-{pid}")
+        if not session_id:
+            continue
+        record = blank_record(session_id, harness, pid, cwd)
+        record["source"] = "scan"
+        record["status"] = "alive"
+        record["activity"] = ""
+        record["window"] = window_for(pid, clients)
+        record["title"] = title_of(cwd, harness)
+        previous = read_record(session_path(session_id))
+        if previous and _scan_unchanged(previous, record):
+            continue
+        write_record(record)
+    return 0
+
+
+def _scan_unchanged(previous, record):
+    keys = ("harness", "pid", "cwd", "title", "status", "window", "activity", "source")
+    return all(previous.get(key) == record.get(key) for key in keys)
+
+
+def cmd_watch(_argv=None):
+    while True:
+        if not toggle_on():
+            return 0
+        try:
+            cmd_scan()
+            cmd_gc()
+        except Exception:
+            if os.environ.get("DASHBOTS_DEBUG"):
+                traceback.print_exc(file=sys.stderr)
+        for _ in range(10):
+            if not toggle_on():
+                return 0
+            time.sleep(0.2)
+
+
+def flag_value(argv, name):
+    if name not in argv:
+        return None
+    index = argv.index(name)
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
+def cmd_report(argv):
+    if not toggle_on():
+        print("dashbots is off (toggle flag missing); report skipped", file=sys.stderr)
+        return 0
+    harness = sanitize_harness(flag_value(argv, "--harness") or "")
+    if not harness:
+        print("dashbots report needs --harness", file=sys.stderr)
+        return 2
+    session_id = sanitize_id(flag_value(argv, "--id") or "")
+    if not session_id:
+        print("dashbots report needs --id", file=sys.stderr)
+        return 2
+    raw_pid = flag_value(argv, "--pid")
+    if raw_pid is None:
+        pid = os.getppid()
+    else:
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            print("dashbots report --pid must be an integer", file=sys.stderr)
+            return 2
+    status = flag_value(argv, "--status") or "alive"
+    if status not in STATUSES:
+        print("dashbots report --status must be alive, working, waiting, or error", file=sys.stderr)
+        return 2
+    cwd = flag_value(argv, "--cwd") or os.getcwd()
+    source = flag_value(argv, "--source") or "hook"
+    if source not in ("hook", "scan"):
+        print("dashbots report --source must be hook or scan", file=sys.stderr)
+        return 2
+    record = blank_record(session_id, harness, pid, cwd)
+    record["status"] = status
+    record["source"] = source
+    record["activity"] = first_line(flag_value(argv, "--activity") or "")
+    title = flag_value(argv, "--title")
+    if title:
+        record["title"] = first_line(title)
+    window = str(flag_value(argv, "--window") or "")
+    record["window"] = window if ADDR_RE.fullmatch(window) else ""
+    record["turn"] = str(flag_value(argv, "--turn") or "")
+    if source == "hook":
+        delete_scan_twin(pid)
+    write_record(record)
+    return 0
+
+
+def cmd_hook(argv):
+    try:
+        harness = flag_value(argv, "--harness") or ""
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return 0
+        payload = json.loads(raw)
+        apply_hook(payload, harness)
+    except Exception:
+        if os.environ.get("DASHBOTS_DEBUG"):
+            traceback.print_exc(file=sys.stderr)
+    return 0
+
+
+def hook_command(harness, timeout):
+    command = os.path.join(lib_dir(), harness)
+    entry = {"type": "command", "command": command, "timeout": timeout}
+    return entry
+
+
+def hook_group(harness, timeout, matcher=None):
+    group = {"hooks": [hook_command(harness, timeout)]}
+    if matcher:
+        group = {"matcher": matcher, "hooks": [hook_command(harness, timeout)]}
+    return group
+
+
+def is_our_group(group, harness):
+    if not isinstance(group, dict):
+        return False
+    for hook in group.get("hooks") or []:
+        if not isinstance(hook, dict):
+            continue
+        command = str(hook.get("command") or "")
+        if f"/lib/dashbots/{harness}" in command:
+            return True
+    return False
+
+
+def merge_hooks(settings, harness, events, timeout, matchers=None):
+    matchers = matchers or {}
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    for event in events:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            groups = []
+        groups = [group for group in groups if not is_our_group(group, harness)]
+        groups.append(hook_group(harness, timeout, matchers.get(event)))
+        hooks[event] = groups
+    settings["hooks"] = hooks
+    return settings
+
+
+def load_json_object(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def write_json(path, data):
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def install_wrapper(harness, gemini=False):
+    ensure_private_dir(os.path.dirname(lib_dir()))
+    os.makedirs(lib_dir(), exist_ok=True)
+    path = os.path.join(lib_dir(), harness)
+    lines = [
+        "#!/bin/sh",
+        f'bin="$HOME/.local/bin/dashbots"',
+    ]
+    if gemini:
+        lines.append(f'"$bin" hook --harness {harness}')
+        lines.append("printf '%s\\n' '{}'")
+        lines.append("exit 0")
+    else:
+        lines.append(f'exec "$bin" hook --harness {harness}')
+    text = "\n".join(lines) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=lib_dir(), prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+        os.chmod(path, 0o755)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def install_bin_link():
+    destination = bin_path()
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    target = os.path.realpath(os.path.abspath(__file__))
+    if os.path.islink(destination):
+        current = os.path.realpath(destination)
+        if current == target:
+            return
+        raise SystemExit(f"refusing to replace {destination} (points at {os.readlink(destination)})")
+    if os.path.exists(destination):
+        raise SystemExit(f"refusing to replace existing file {destination}")
+    os.symlink(target, destination)
+
+
+def write_markers():
+    ensure_private_dir(adapters_dir())
+    for harness in ADAPTERS:
+        path = os.path.join(adapters_dir(), harness)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        os.chmod(path, 0o600)
+
+
+def install_grok_hooks():
+    path = os.path.join(home(), ".grok", "hooks", "dashbots.json")
+    settings = merge_hooks(
+        {},
+        "grok",
+        GROK_EVENTS,
+        5,
+        {"Notification": "idle_prompt|permission_prompt|elicitation_dialog"},
+    )
+    write_json(path, settings)
+
+
+def install_settings_hooks(path, harness, events, timeout, matchers=None):
+    loaded = load_json_object(path)
+    if loaded is None:
+        print(f"skipped {harness}: {path} is not strict JSON", file=sys.stderr)
+        return False
+    settings = merge_hooks(loaded, harness, events, timeout, matchers)
+    write_json(path, settings)
+    return True
+
+
+def copy_plugin():
+    source = os.path.join(repo_root(), "plugin")
+    destination = plugin_dir()
+    os.makedirs(destination, exist_ok=True)
+    for name in ("manifest.json", "BarWidget.qml"):
+        src = os.path.join(source, name)
+        dst = os.path.join(destination, name)
+        if os.path.islink(dst):
+            os.unlink(dst)
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o644)
+
+
+def shell_up():
+    try:
+        result = subprocess.run(
+            ["omarchy-shell", "shell", "ping"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "ok" in (result.stdout or "")
+
+
+def plugin_known():
+    try:
+        result = subprocess.run(
+            ["omarchy", "plugin", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, list):
+        return False
+    return any(isinstance(item, dict) and item.get("id") == "dashbots" for item in data)
+
+
+def bar_has_dashbots(config=None):
+    if config is None:
+        config = load_json_object(shell_json_path()) or {}
+    layout = ((config.get("bar") or {}).get("layout") or {})
+    for section in ("left", "center", "right"):
+        for entry in layout.get(section) or []:
+            if isinstance(entry, dict) and entry.get("id") == "dashbots":
+                return True
+    return False
+
+
+def insert_shell_entry():
+    path = shell_json_path()
+    config = load_json_object(path)
+    if config is None:
+        raise SystemExit(f"{path} is not strict JSON; bar slot was not inserted")
+    if bar_has_dashbots(config):
+        return
+    bar = config.setdefault("bar", {})
+    layout = bar.setdefault("layout", {})
+    right = layout.get("right")
+    if not isinstance(right, list):
+        right = []
+    right.insert(0, {"id": "dashbots"})
+    layout["right"] = right
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    shutil.copy(path, f"{path}.bak.{stamp}")
+    write_json(path, config)
+
+
+def enable_bar_slot():
+    if bar_has_dashbots():
+        print("Bar slot already present; left it where it is.")
+        return
+    if not shell_up():
+        insert_shell_entry()
+        print("Shell is down. Inserted the bar slot into shell.json.")
+        return
+    try:
+        subprocess.run(
+            ["omarchy-shell", "shell", "rescanPlugins"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        debug(exc)
+    known = False
+    for _ in range(20):
+        if plugin_known():
+            known = True
+            break
+        time.sleep(0.25)
+    if not known:
+        insert_shell_entry()
+        print("Plugin was not known after rescan. Inserted the bar slot and did not enable.")
+        return
+    result = subprocess.run(
+        ["omarchy", "plugin", "enable", "dashbots", "--section", "right", "--before", "omarchy.tray"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr or result.stdout or "enable failed\n")
+        raise SystemExit(result.returncode)
+    text = (result.stdout or "").strip()
+    if text:
+        print(text)
+
+
+def install_units():
+    destination = systemd_user_dir()
+    os.makedirs(destination, exist_ok=True)
+    source = os.path.join(repo_root(), "systemd")
+    for name in ("dashbots.service", "dashbots.path"):
+        shutil.copyfile(os.path.join(source, name), os.path.join(destination, name))
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=20)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", "dashbots.path"],
+        check=False,
+        timeout=20,
+    )
+
+
+def touch_flag():
+    path = toggle_path()
+    # Tests can point the flag at a temp file. Install on a real machine uses
+    # the Omarchy toggle path, which is not the override.
+    if os.environ.get("DASHBOTS_TOGGLE_FILE"):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        open(path, "a", encoding="utf-8").close()
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "a", encoding="utf-8").close()
+
+
+def cmd_install(_argv=None):
+    install_bin_link()
+    for harness in ADAPTERS:
+        install_wrapper(harness, gemini=(harness == "gemini"))
+    install_grok_hooks()
+    install_settings_hooks(
+        os.path.join(home(), ".claude", "settings.json"),
+        "claude",
+        GROK_EVENTS,
+        5,
+        {"Notification": "idle_prompt|permission_prompt|elicitation_dialog"},
+    )
+    install_settings_hooks(
+        os.path.join(home(), ".gemini", "settings.json"),
+        "gemini",
+        GEMINI_EVENTS,
+        5000,
+    )
+    copy_plugin()
+    validate = subprocess.run(
+        ["omarchy", "plugin", "validate", plugin_dir()],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if validate.returncode != 0:
+        sys.stderr.write(validate.stderr or validate.stdout or "plugin validate failed\n")
+        return validate.returncode or 1
+    write_markers()
+    touch_flag()
+    enable_bar_slot()
+    install_units()
+    print("Installed dashbots.")
+    print(
+        "Hooks load when a session starts. A session already open, including this one, "
+        "will not report until it is restarted. Grok, Claude, and Gemini now have adapters, "
+        "so the process scan will not draw those sessions either."
+    )
+    print("Toggle with: omarchy toggle dashbots")
+    return 0
+
+
+def strip_our_hooks(settings, harness):
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings
+    empty = []
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        kept = [group for group in groups if not is_our_group(group, harness)]
+        if kept:
+            hooks[event] = kept
+        else:
+            empty.append(event)
+    for event in empty:
+        hooks.pop(event, None)
+    if not hooks:
+        settings.pop("hooks", None)
+    return settings
+
+
+def uninstall_settings(path, harness):
+    if not os.path.exists(path):
+        return
+    loaded = load_json_object(path)
+    if loaded is None:
+        print(f"skipped {harness}: {path} is not strict JSON", file=sys.stderr)
+        return
+    strip_our_hooks(loaded, harness)
+    if loaded:
+        write_json(path, loaded)
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def remove_bar_entry():
+    subprocess.run(
+        ["omarchy", "plugin", "disable", "dashbots"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if not bar_has_dashbots():
+        return
+    path = shell_json_path()
+    config = load_json_object(path)
+    if not isinstance(config, dict):
+        print(f"could not remove the bar slot; {path} is not strict JSON", file=sys.stderr)
+        return
+    layout = ((config.get("bar") or {}).get("layout") or {})
+    for section in ("left", "center", "right"):
+        entries = layout.get(section)
+        if not isinstance(entries, list):
+            continue
+        layout[section] = [
+            entry for entry in entries
+            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+        ]
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    shutil.copy(path, f"{path}.bak.{stamp}")
+    write_json(path, config)
+
+
+def cmd_uninstall(_argv=None):
+    flag = toggle_path()
+    if not os.environ.get("DASHBOTS_TOGGLE_FILE"):
+        try:
+            os.remove(flag)
+        except FileNotFoundError:
+            pass
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", "dashbots.path"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    subprocess.run(
+        ["systemctl", "--user", "stop", "dashbots.service"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    for name in ("dashbots.service", "dashbots.path"):
+        try:
+            os.remove(os.path.join(systemd_user_dir(), name))
+        except FileNotFoundError:
+            pass
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=20, check=False)
+    remove_bar_entry()
+    if os.path.isdir(plugin_dir()):
+        shutil.rmtree(plugin_dir())
+    try:
+        subprocess.run(
+            ["omarchy-shell", "shell", "rescanPlugins"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    grok_hook = os.path.join(home(), ".grok", "hooks", "dashbots.json")
+    try:
+        os.remove(grok_hook)
+    except FileNotFoundError:
+        pass
+    uninstall_settings(os.path.join(home(), ".claude", "settings.json"), "claude")
+    uninstall_settings(os.path.join(home(), ".gemini", "settings.json"), "gemini")
+    if os.path.isdir(lib_dir()):
+        shutil.rmtree(lib_dir())
+    for harness in ADAPTERS:
+        try:
+            os.remove(os.path.join(adapters_dir(), harness))
+        except FileNotFoundError:
+            pass
+    destination = bin_path()
+    if os.path.islink(destination):
+        target = os.path.realpath(destination)
+        if os.path.basename(target) == "dashbots" and target.endswith(os.path.join("bin", "dashbots")):
+            os.remove(destination)
+    print("Uninstalled dashbots. Session records were left in the state directory.")
+    return 0
+
+
+def cmd_status(_argv=None):
+    print(f"toggle: {'on' if toggle_on() else 'off'}")
+    print(f"flag: {toggle_path()}")
+    link = bin_path()
+    if os.path.islink(link):
+        print(f"bin: {link} -> {os.readlink(link)}")
+    elif os.path.exists(link):
+        print(f"bin: {link} (not a symlink)")
+    else:
+        print("bin: missing")
+    for harness in ADAPTERS:
+        marker = "marker" if has_marker(harness) else "no marker"
+        wrapper = os.path.join(lib_dir(), harness)
+        present = "wrapper" if os.path.isfile(wrapper) else "no wrapper"
+        print(f"adapter {harness}: {present}, {marker}")
+    try:
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "dashbots.service"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        enabled = subprocess.run(
+            ["systemctl", "--user", "is-enabled", "dashbots.path"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        print(f"watcher: {(active.stdout or '').strip() or 'unknown'}")
+        print(f"path unit: {(enabled.stdout or '').strip() or 'unknown'}")
+    except (OSError, subprocess.TimeoutExpired):
+        print("watcher: unknown")
+    print(f"live: {len(live_records())}")
+    return 0
+
+
+def usage():
+    print(
+        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|install|uninstall|status>",
+        file=sys.stderr,
+    )
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help"):
+        usage()
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
+    command = argv[0]
+    if command == "hook":
+        return cmd_hook(argv)
+    dispatch = {
+        "report": cmd_report,
+        "clear": cmd_clear,
+        "watch": cmd_watch,
+        "gc": cmd_gc,
+        "scan": cmd_scan,
+        "list": cmd_list,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "status": cmd_status,
+    }
+    func = dispatch.get(command)
+    if not func:
+        usage()
+        return 2
+    return func(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

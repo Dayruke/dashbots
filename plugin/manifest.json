@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "dashbots",
+  "name": "Dashbots",
+  "version": "0.1.0",
+  "author": "Dayruke",
+  "description": "One bar mark per live agent session",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Dashbots",
+    "description": "One bar mark per live agent session",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,5 @@
+#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+"$root/bin/dashbots" hook --harness gemini
+printf '%s\n' '{}'
+exit 0
