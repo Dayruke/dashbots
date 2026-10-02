@@ -7,6 +7,7 @@ itself. Debug goes to stderr only when DASHBOTS_DEBUG is set.
 
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ ADDR_RE = re.compile(r"^0x[0-9a-fA-F]+$")
 ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 HARNESS_RE = re.compile(r"[a-z0-9_-]{1,32}")
 STATUSES = ("alive", "working", "waiting", "error")
+BODIES = ("circle", "blob", "triangle", "square")
 ADAPTERS = ("grok", "claude", "gemini")
 SCAN_NAMES = ("grok", "claude", "gemini", "agy", "codex", "opencode")
 
@@ -167,12 +169,49 @@ def read_record(path):
     return data
 
 
+def sanitize_body(value):
+    text = str(value or "").strip().lower()
+    if text in BODIES:
+        return text
+    return ""
+
+
+def choose_body(except_id=None):
+    """Pick a body that no other live session is using, if one is free."""
+    counts = {body: 0 for body in BODIES}
+    skip = sanitize_id(except_id or "")
+    for record in iter_records():
+        if sanitize_id(record.get("id")) == skip:
+            continue
+        if not pid_alive(record.get("pid")):
+            continue
+        body = sanitize_body(record.get("body"))
+        if body:
+            counts[body] += 1
+    least = min(counts.values())
+    pool = [body for body in BODIES if counts[body] == least]
+    return random.choice(pool)
+
+
+def ensure_body(record):
+    body = sanitize_body(record.get("body"))
+    if body:
+        record["body"] = body
+        return body
+    session_id = sanitize_id(record.get("id"))
+    previous = read_record(session_path(session_id)) if session_id else None
+    kept = sanitize_body(previous.get("body")) if previous else ""
+    record["body"] = kept or choose_body(session_id)
+    return record["body"]
+
+
 def write_record(record):
     session_id = sanitize_id(record.get("id"))
     if not session_id:
         return
     record = dict(record)
     record["id"] = session_id
+    ensure_body(record)
     record["updated_at"] = now_stamp()
     ensure_private_dir(sessions_dir())
     destination = session_path(session_id)
@@ -628,8 +667,108 @@ def live_records():
     return found
 
 
+def hypr_text(args):
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout or ""
+
+
+def parse_cursor_pos(text):
+    raw = "".join((text or "").split())
+    if "," not in raw:
+        return None
+    x_text, y_text = raw.split(",", 1)
+    if not re.fullmatch(r"-?\d+", x_text) or not re.fullmatch(r"-?\d+", y_text):
+        return None
+    return int(x_text), int(y_text)
+
+
+def _option_value(text, kind):
+    for line in (text or "").splitlines():
+        parts = line.split(":", 1)
+        if len(parts) != 2 or parts[0].strip() != kind:
+            continue
+        rest = parts[1].strip()
+        if not rest:
+            return ""
+        return rest.split()[0]
+    return ""
+
+
+def parse_hypr_bool(text):
+    value = _option_value(text, "bool") or _option_value(text, "int")
+    return "true" if value in ("true", "1") else "false"
+
+
+def parse_hypr_choice(text, allowed=("0", "1", "2")):
+    value = _option_value(text, "int")
+    if value in allowed:
+        return value
+    return allowed[0]
+
+
+def focus_lua(address, cursor, no_warps, warp_workspace):
+    """Focus one window without leaving the pointer on it.
+
+    Hyprland centers the pointer when a focus also changes workspace.
+    Warps stay off for that dispatch, then the pointer goes back to the
+    click. The caller's cursor options are restored in the same eval.
+    """
+    if not ADDR_RE.fullmatch(address or ""):
+        raise ValueError("bad address")
+    if no_warps not in ("true", "false"):
+        no_warps = "false"
+    if str(warp_workspace) not in ("0", "1", "2"):
+        warp_workspace = "0"
+    steps = [
+        "hl.config({ cursor = { no_warps = true, warp_on_change_workspace = 0 } })",
+        f'pcall(function() hl.dispatch(hl.dsp.focus({{ window = "address:{address}" }})) end)',
+    ]
+    if cursor is not None:
+        x_pos, y_pos = cursor
+        steps.append(f"hl.dispatch(hl.dsp.cursor.move({{ x = {int(x_pos)}, y = {int(y_pos)} }}))")
+    steps.append(
+        "hl.config({ cursor = { no_warps = "
+        + no_warps
+        + ", warp_on_change_workspace = "
+        + str(warp_workspace)
+        + " } })"
+    )
+    return "; ".join(steps)
+
+
+def cmd_focus(argv):
+    address = argv[1] if len(argv) > 1 else ""
+    if not ADDR_RE.fullmatch(address):
+        print("dashbots focus needs a window address", file=sys.stderr)
+        return 2
+    cursor = parse_cursor_pos(hypr_text(["hyprctl", "cursorpos"]))
+    no_warps = parse_hypr_bool(hypr_text(["hyprctl", "getoption", "cursor:no_warps"]))
+    warp = parse_hypr_choice(hypr_text(["hyprctl", "getoption", "cursor:warp_on_change_workspace"]))
+    expr = focus_lua(address, cursor, no_warps, warp)
+    if not hypr_text(["hyprctl", "eval", expr]):
+        return 1
+    return 0
+
+
 def cmd_list(_argv=None):
-    print(json.dumps(live_records(), sort_keys=True, separators=(",", ":")))
+    records = live_records()
+    for record in records:
+        if sanitize_body(record.get("body")):
+            continue
+        ensure_body(record)
+        write_record(record)
+    print(json.dumps(records, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -941,17 +1080,35 @@ def install_settings_hooks(path, harness, events, timeout, matchers=None):
     return True
 
 
+def copy_file(src, dst):
+    if os.path.islink(dst):
+        os.unlink(dst)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+    os.chmod(dst, 0o644)
+
+
 def copy_plugin():
     source = os.path.join(repo_root(), "plugin")
     destination = plugin_dir()
     os.makedirs(destination, exist_ok=True)
     for name in ("manifest.json", "BarWidget.qml"):
-        src = os.path.join(source, name)
-        dst = os.path.join(destination, name)
-        if os.path.islink(dst):
-            os.unlink(dst)
-        shutil.copyfile(src, dst)
-        os.chmod(dst, 0o644)
+        copy_file(os.path.join(source, name), os.path.join(destination, name))
+    icons_src = os.path.join(source, "icons")
+    icons_dst = os.path.join(destination, "icons")
+    os.makedirs(icons_dst, exist_ok=True)
+    wanted = set()
+    for name in os.listdir(icons_src):
+        if not name.endswith(".svg"):
+            continue
+        wanted.add(name)
+        copy_file(os.path.join(icons_src, name), os.path.join(icons_dst, name))
+    for name in os.listdir(icons_dst):
+        if name.endswith(".svg") and name not in wanted:
+            try:
+                os.remove(os.path.join(icons_dst, name))
+            except OSError:
+                pass
 
 
 def shell_up():
@@ -1001,6 +1158,14 @@ def bar_has_dashbots(config=None):
     return False
 
 
+def insert_after(entries, anchor):
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("id") == anchor:
+            entries.insert(index + 1, {"id": "dashbots"})
+            return True
+    return False
+
+
 def insert_shell_entry():
     path = shell_json_path()
     config = load_json_object(path)
@@ -1010,11 +1175,20 @@ def insert_shell_entry():
         return
     bar = config.setdefault("bar", {})
     layout = bar.setdefault("layout", {})
-    right = layout.get("right")
-    if not isinstance(right, list):
-        right = []
-    right.insert(0, {"id": "dashbots"})
-    layout["right"] = right
+    center = layout.get("center")
+    if not isinstance(center, list):
+        center = []
+        layout["center"] = center
+    # Right of weather. The shell pins the tray to the inner edge of the
+    # right section, so "before the tray" cannot sit between center and tray.
+    # If weather is missing, sit on the left, after the workspace switcher.
+    if not insert_after(center, "omarchy.weather"):
+        left = layout.get("left")
+        if not isinstance(left, list):
+            left = []
+            layout["left"] = left
+        if not insert_after(left, "omarchy.workspaces"):
+            left.append({"id": "dashbots"})
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     shutil.copy(path, f"{path}.bak.{stamp}")
     write_json(path, config)
@@ -1049,12 +1223,20 @@ def enable_bar_slot():
         print("Plugin was not known after rescan. Inserted the bar slot and did not enable.")
         return
     result = subprocess.run(
-        ["omarchy", "plugin", "enable", "dashbots", "--section", "right", "--before", "omarchy.tray"],
+        ["omarchy", "plugin", "enable", "dashbots", "--section", "center", "--after", "omarchy.weather"],
         capture_output=True,
         text=True,
         timeout=20,
         check=False,
     )
+    if result.returncode != 0:
+        result = subprocess.run(
+            ["omarchy", "plugin", "enable", "dashbots", "--section", "left", "--after", "omarchy.workspaces"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
     if result.returncode != 0:
         sys.stderr.write(result.stderr or result.stdout or "enable failed\n")
         raise SystemExit(result.returncode)
@@ -1302,7 +1484,7 @@ def cmd_status(_argv=None):
 
 def usage():
     print(
-        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|install|uninstall|status>",
+        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|focus|install|uninstall|status>",
         file=sys.stderr,
     )
 
@@ -1322,6 +1504,7 @@ def main(argv=None):
         "gc": cmd_gc,
         "scan": cmd_scan,
         "list": cmd_list,
+        "focus": cmd_focus,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "status": cmd_status,

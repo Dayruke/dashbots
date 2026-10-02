@@ -303,6 +303,32 @@ class DashbotsTest(unittest.TestCase):
         listed = self.mod.live_records()
         self.assertEqual([item["id"] for item in listed], ["newer", "older"])
 
+    def test_body_is_unique_until_the_catalog_is_full(self):
+        self.mod.random.seed(0)
+        for index in range(4):
+            self.hook({
+                "hook_event_name": "SessionStart",
+                "sessionId": f"s{index}",
+                "cwd": "/work/demo",
+            })
+        bodies = [self.record(f"s{index}")["body"] for index in range(4)]
+        self.assertEqual(sorted(bodies), ["blob", "circle", "square", "triangle"])
+        kept = self.record("s0")["body"]
+        self.hook({
+            "hook_event_name": "UserPromptSubmit",
+            "sessionId": "s0",
+            "promptId": "p1",
+            "prompt": "keep the shape",
+            "cwd": "/work/demo",
+        })
+        self.assertEqual(self.record("s0")["body"], kept)
+        self.hook({
+            "hook_event_name": "SessionStart",
+            "sessionId": "s4",
+            "cwd": "/work/demo",
+        })
+        self.assertIn(self.record("s4")["body"], bodies)
+
     def test_unsafe_id_is_dropped(self):
         self.hook({"hook_event_name": "SessionStart", "sessionId": "../etc/passwd", "cwd": "/work/demo"})
         self.assertEqual(list(Path(self.mod.sessions_dir()).glob("*.json")) if Path(self.mod.sessions_dir()).exists() else [], [])
@@ -358,6 +384,49 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(self.record("quiet")["status"], "alive")
+
+    def test_focus_keeps_the_pointer_and_restores_warps(self):
+        lua = self.mod.focus_lua("0xabc", (12, -4), "true", "1")
+        self.assertIn("no_warps = true", lua)
+        self.assertIn("warp_on_change_workspace = 0", lua)
+        self.assertIn('window = "address:0xabc"', lua)
+        self.assertIn("x = 12, y = -4", lua)
+        self.assertIn("no_warps = true, warp_on_change_workspace = 1", lua)
+        self.assertLess(lua.index("hl.dsp.focus"), lua.index("hl.dsp.cursor.move"))
+        self.assertLess(lua.index("hl.dsp.cursor.move"), lua.rindex("hl.config"))
+
+        self.assertIsNone(self.mod.parse_cursor_pos("nope"))
+        self.assertEqual(self.mod.parse_cursor_pos("744, 18\n"), (744, 18))
+        self.assertEqual(self.mod.parse_hypr_bool("bool: false\nset: true\n"), "false")
+        self.assertEqual(self.mod.parse_hypr_choice("int: 1\nset: true\n"), "1")
+        self.assertEqual(self.mod.cmd_focus(["focus", "not-an-address"]), 2)
+
+        calls = []
+
+        def fake_hypr(args):
+            calls.append(list(args))
+            if args[1:] == ["cursorpos"]:
+                return "10, 20\n"
+            if args[1:] == ["getoption", "cursor:no_warps"]:
+                return "bool: false\nset: false\n"
+            if args[1:] == ["getoption", "cursor:warp_on_change_workspace"]:
+                return "int: 1\nset: true\n"
+            if args[1] == "eval":
+                return "ok\n"
+            return ""
+
+        original = self.mod.hypr_text
+        self.mod.hypr_text = fake_hypr
+        try:
+            self.assertEqual(self.mod.cmd_focus(["focus", "0x55"]), 0)
+        finally:
+            self.mod.hypr_text = original
+        self.assertEqual(calls[-1][1], "eval")
+        expr = calls[-1][2]
+        self.assertIn('window = "address:0x55"', expr)
+        self.assertIn("x = 10, y = 20", expr)
+        self.assertIn("warp_on_change_workspace = 1", expr)
+        self.assertTrue(expr.endswith("warp_on_change_workspace = 1 } })"))
 
 
 if __name__ == "__main__":

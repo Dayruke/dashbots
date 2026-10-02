@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -6,13 +7,17 @@ import qs.Ui
 
 // Third-party slot. The host injects PluginBarApi as `bar` (foreground,
 // urgent, run, showTooltip, hideTooltip). Accent and muted stay on Color.
+//
+// Bodies are single-color SVGs. Eyes are cut out of the shape, so the theme
+// color is the body and the bar shows through the eyes. Working is the accent
+// color and the body breathes. A finished turn is muted, with dashes.
 BarWidget {
   id: root
 
   property bool toggleOn: false
   property string listText: ""
   property var sessions: []
-  property real workPulse: 1
+  property real breath: 1
 
   readonly property string home: Quickshell.env("HOME")
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
@@ -34,16 +39,25 @@ BarWidget {
   implicitWidth: toggleOn ? (vertical ? barSize : marksGrid.implicitWidth) : 0
   implicitHeight: toggleOn ? (vertical ? marksGrid.implicitHeight : barSize) : 0
 
-  function markLetter(harness) {
-    var name = String(harness || "").toLowerCase()
-    if (name === "grok") return "G"
-    if (name === "claude") return "C"
-    if (name === "gemini") return "M"
-    if (name === "codex") return "X"
-    if (name === "agy" || name === "antigravity") return "A"
-    if (name === "opencode") return "O"
-    var ch = name.charAt(0)
-    return ch ? ch.toUpperCase() : "?"
+  // The reporter picks a body per live session and keeps it. The widget
+  // only draws the name it was given.
+  function bodyName(session) {
+    var body = String(session && session.body || "").toLowerCase()
+    if (body === "circle" || body === "blob" || body === "triangle" || body === "square")
+      return body
+    return "circle"
+  }
+
+  function asleep(session) {
+    if (!session || session.empty === true) return false
+    return String(session.status || "") === "waiting"
+        && String(session.activity || "") !== "needs a decision"
+  }
+
+  function faceUrl(session) {
+    var body = bodyName(session)
+    var face = asleep(session) ? "-sleep" : ""
+    return Qt.resolvedUrl("icons/" + body + face + ".svg")
   }
 
   function harnessName(harness) {
@@ -57,9 +71,14 @@ BarWidget {
     return String(harness || "Agent")
   }
 
-  function markColor(status) {
-    if (status === "waiting") return Color.accent
+  function markColor(session) {
+    if (!session || session.empty === true) return Color.muted
+    var status = String(session.status || "")
     if (status === "error") return bar ? bar.urgent : Color.urgent
+    if (status === "working") return Color.accent
+    if (status === "waiting" && String(session.activity || "") === "needs a decision")
+      return Color.accent
+    if (status === "waiting") return Color.muted
     return bar ? bar.foreground : Color.foreground
   }
 
@@ -71,11 +90,16 @@ BarWidget {
     return lines.join("\n")
   }
 
+  // Focusing also switches to that window's workspace. Hyprland would
+  // center the pointer on the window. The reporter turns that warp off
+  // and puts the pointer back on the click.
   function focusSession(session) {
-    if (!session || session.empty === true || !bar) return
+    if (!session || session.empty === true) return
     var addr = String(session.window || "")
     if (!/^0x[0-9a-fA-F]+$/.test(addr)) return
-    bar.run("hyprctl dispatch focuswindow address:" + addr)
+    if (focusProc.running) return
+    focusProc.command = [root.binPath, "focus", addr]
+    focusProc.running = true
   }
 
   function applyList(text) {
@@ -109,7 +133,7 @@ BarWidget {
     if (!flagProc.running) flagProc.running = true
   }
 
-  onAnyWorkingChanged: if (!anyWorking) workPulse = 1
+  onAnyWorkingChanged: if (!anyWorking) root.breath = 1
 
   Timer {
     interval: 1000
@@ -119,11 +143,27 @@ BarWidget {
     onTriggered: root.poll()
   }
 
-  Timer {
-    interval: 700
+  // Size, not a same-color fade. A 16px opacity dip sits next to identical
+  // marks and does not read as motion.
+  SequentialAnimation {
     running: root.anyWorking
-    repeat: true
-    onTriggered: root.workPulse = root.workPulse < 0.7 ? 1 : 0.45
+    loops: Animation.Infinite
+    NumberAnimation {
+      target: root
+      property: "breath"
+      from: 1
+      to: 0.9
+      duration: 1240
+      easing.type: Easing.InOutSine
+    }
+    NumberAnimation {
+      target: root
+      property: "breath"
+      from: 0.9
+      to: 1
+      duration: 1240
+      easing.type: Easing.InOutSine
+    }
   }
 
   Process {
@@ -143,6 +183,11 @@ BarWidget {
         listProc.running = true
       }
     }
+  }
+
+  Process {
+    id: focusProc
+    command: [root.binPath, "focus"]
   }
 
   Process {
@@ -167,12 +212,15 @@ BarWidget {
     Repeater {
       model: root.marks
       delegate: BarIconButton {
+        id: button
         required property var modelData
         readonly property bool blank: modelData && modelData.empty === true
         readonly property string sessionStatus: blank ? "" : String(modelData.status || "")
 
         bar: root.bar
-        text: blank ? "_" : root.markLetter(modelData.harness)
+        text: blank ? "_" : ""
+        hasVisualContent: true
+        labelVisible: blank
         tooltipText: root.tipFor(modelData)
         slotSize: Style.bar.statusSlot
         fontSize: Style.bar.iconFont
@@ -180,12 +228,43 @@ BarWidget {
         height: root.barSize
         pressable: !blank
         useActiveColor: false
-        foreground: blank ? Color.muted : root.markColor(sessionStatus)
-        opacity: sessionStatus === "working" ? root.workPulse : 1
+        foreground: root.markColor(modelData)
 
-        onPressed: function(button) {
-          if (button !== Qt.LeftButton) return
+        onPressed: function(mouseButton) {
+          if (mouseButton !== Qt.LeftButton) return
           root.focusSession(modelData)
+        }
+
+        // The SVG is white with transparent eyes. The effect replaces that
+        // white with the theme role and leaves the eye holes clear. Same
+        // arrangement as the tray's symbolic icons, so a new role repaints.
+        Item {
+          id: faceLayer
+          visible: !button.blank
+          anchors.centerIn: parent
+          width: Style.bar.iconCanvas
+          height: Style.bar.iconCanvas
+          scale: button.sessionStatus === "working" ? root.breath : 1
+          transformOrigin: Item.Center
+
+          Image {
+            id: faceImage
+            anchors.fill: parent
+            source: root.faceUrl(button.modelData)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            visible: false
+            layer.enabled: true
+            sourceSize.width: Math.round(width * Screen.devicePixelRatio)
+            sourceSize.height: Math.round(height * Screen.devicePixelRatio)
+          }
+
+          MultiEffect {
+            anchors.fill: faceImage
+            source: faceImage
+            colorization: 1.0
+            colorizationColor: button.foreground
+          }
         }
       }
     }
