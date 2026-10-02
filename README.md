@@ -16,11 +16,11 @@ From a checkout:
 ./bin/dashbots install
 ```
 
-Install links `~/.local/bin/dashbots` to this script and refuses to overwrite a file that is already there. It writes the hook adapters, merges them into the harness hook files, copies the plugin into `~/.config/omarchy/plugins/dashbots/`, validates it, and places the bar slot to the right of weather if the slot is not already in the layout. If weather is not on the bar, the slot goes on the left, after the workspace switcher. A later install does not move a slot you have dragged. It enables the user systemd path unit `dashbots.path`, which starts `dashbots.service` while the flag exists.
+Install links `~/.local/bin/dashbots` to this script and refuses to overwrite a file that is already there. It writes the hook adapters, merges them into the harness hook files, copies the plugin into `~/.config/omarchy/plugins/dashbots/`, validates it, and places the bar slot to the right of weather if the slot is not already in the layout. If weather is not on the bar, the slot goes on the left, after the workspace switcher. A later install does not move a slot you have dragged. It enables the user systemd path unit `dashbots.path`, which starts `dashbots.service` while the flag exists. It also adds a Dashbots row to the Omarchy menu under Trigger, then Toggle.
 
 Hooks load when a session starts. A session that is already open, including the one that ran install, will not report until it is restarted. Once the Grok, Claude, and Gemini adapters are installed, the process scan will not draw those harnesses either. Restart the session you want on the bar.
 
-Remove it with `dashbots uninstall`. That drops the hooks, the plugin, the bar slot, and the watcher. Session files already written are left in the state directory.
+Remove it with `dashbots uninstall`. That drops the hooks, the plugin, the bar slot, the menu row, and the watcher. Session files already written are left in the state directory.
 
 
 ## How it works
@@ -52,7 +52,7 @@ Hover shows the harness, the session name (the directory it started in), and the
 
 Left click focuses that session's terminal and switches to its workspace. The pointer stays where the click was. The address has to look like `0x` plus hex. That is the only Hyprland use. There is no menu on right click, and a click never starts a new agent.
 
-`omarchy toggle dashbots` turns it off and on. The flag is `~/.local/state/omarchy/toggles/dashbots`. Present means on. Off exits the watcher. The widget hides, and the slot collapses, but the layout row stays where you dragged it. On again, it comes back. Default is on.
+`omarchy toggle dashbots` turns it off and on. The same switch is in the Omarchy menu under Trigger, then Toggle. A check mark on that row means it is on. The flag is `~/.local/state/omarchy/toggles/dashbots`. Present means on. Off exits the watcher. The widget hides, and the slot collapses, but the layout row stays where you dragged it. On again, it comes back. Default is on.
 
 ## Icon reference
 

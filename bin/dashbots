@@ -125,6 +125,15 @@ def shell_json_path():
     return os.path.join(home(), ".config", "omarchy", "shell.json")
 
 
+MENU_ID = "trigger.toggle.dashbots"
+MENU_ENTRY = {
+    "icon": "\U000f0765",
+    "label": "Dashbots",
+    "checked": "omarchy-toggle-enabled dashbots",
+    "action": "omarchy-toggle dashbots",
+}
+
+
 def systemd_user_dir():
     return os.path.join(home(), ".config", "systemd", "user")
 
@@ -1273,6 +1282,193 @@ def touch_flag():
     open(path, "a", encoding="utf-8").close()
 
 
+def menu_extension_path():
+    override = os.environ.get("DASHBOTS_MENU_FILE")
+    if override:
+        return override
+    return os.path.join(home(), ".config", "omarchy", "extensions", "omarchy-menu.jsonc")
+
+
+def strip_jsonc(raw):
+    # Same reductions the shell menu uses: full-line // comments, then trailing commas.
+    text = re.sub(r"(?m)^\s*//[^\n]*(\n|$)", "", raw or "")
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def parse_menu_jsonc(raw):
+    try:
+        data = json.loads(strip_jsonc(raw))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def menu_entry_line():
+    body = json.dumps(MENU_ENTRY, ensure_ascii=False)
+    return f"  {json.dumps(MENU_ID)}: {body}"
+
+
+def _menu_line_significant(line):
+    text = line.strip()
+    return bool(text) and not text.startswith("//")
+
+
+def _brace_delta(line):
+    depth = 0
+    opened = False
+    in_string = False
+    escape = False
+    for ch in line:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+            opened = True
+        elif ch == "}":
+            depth -= 1
+    return depth, opened
+
+
+def _menu_entry_span(lines):
+    prefix = json.dumps(MENU_ID)
+    start = None
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(prefix):
+            start = index
+            break
+    if start is None:
+        return None
+    depth = 0
+    seen_open = False
+    for index in range(start, len(lines)):
+        delta, opened = _brace_delta(lines[index])
+        depth += delta
+        seen_open = seen_open or opened
+        if seen_open and depth <= 0:
+            return start, index + 1
+    return start, len(lines)
+
+
+def remove_menu_entry(text):
+    lines = text.splitlines()
+    span = _menu_entry_span(lines)
+    if span is None:
+        return text if text.endswith("\n") or not text else text + "\n"
+    start, end = span
+    del lines[start:end]
+    nxt = start
+    while nxt < len(lines) and not _menu_line_significant(lines[nxt]):
+        nxt += 1
+    if nxt < len(lines) and lines[nxt].strip() == "}":
+        prev = start - 1
+        while prev >= 0 and not _menu_line_significant(lines[prev]):
+            prev -= 1
+        if prev >= 0:
+            stripped = lines[prev].rstrip()
+            if stripped.endswith(","):
+                lines[prev] = stripped[:-1].rstrip()
+    return "\n".join(lines) + "\n"
+
+
+def insert_menu_entry(text):
+    line = menu_entry_line() + ","
+    if not text.strip():
+        return "{\n" + line + "\n}\n"
+    lines = text.splitlines()
+    close_at = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() == "}":
+            close_at = index
+            break
+    if close_at is None:
+        return "{\n" + line + "\n}\n"
+    previous = close_at - 1
+    while previous >= 0 and not _menu_line_significant(lines[previous]):
+        previous -= 1
+    if previous >= 0:
+        stripped = lines[previous].rstrip()
+        if stripped and not stripped.endswith(",") and not stripped.endswith("{"):
+            lines[previous] = stripped + ","
+    lines.insert(close_at, line)
+    return "\n".join(lines) + "\n"
+
+
+def _write_text(path, text):
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tmp-menu-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def install_menu_trigger():
+    path = menu_extension_path()
+    original = ""
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                original = handle.read()
+        except OSError as exc:
+            print(f"skipped menu trigger: {exc}", file=sys.stderr)
+            return False
+        parsed = parse_menu_jsonc(original)
+        if parsed is None:
+            print(f"skipped menu trigger: {path} is not JSONC", file=sys.stderr)
+            return False
+        if parsed.get(MENU_ID) == MENU_ENTRY:
+            return True
+        updated = insert_menu_entry(remove_menu_entry(original))
+    else:
+        updated = insert_menu_entry("")
+    parsed = parse_menu_jsonc(updated)
+    if not isinstance(parsed, dict) or parsed.get(MENU_ID) != MENU_ENTRY:
+        print(f"skipped menu trigger: could not build a valid entry for {path}", file=sys.stderr)
+        return False
+    _write_text(path, updated)
+    return True
+
+
+def uninstall_menu_trigger():
+    path = menu_extension_path()
+    if not os.path.exists(path):
+        return True
+    try:
+        with open(path, encoding="utf-8") as handle:
+            original = handle.read()
+    except OSError as exc:
+        print(f"skipped menu trigger removal: {exc}", file=sys.stderr)
+        return False
+    if json.dumps(MENU_ID) not in original:
+        return True
+    updated = remove_menu_entry(original)
+    parsed = parse_menu_jsonc(updated)
+    if not isinstance(parsed, dict) or MENU_ID in parsed:
+        print(f"skipped menu trigger removal: {path} would not stay valid JSONC", file=sys.stderr)
+        return False
+    if updated != original:
+        _write_text(path, updated)
+    return True
+
+
 def cmd_install(_argv=None):
     install_bin_link()
     for harness in ADAPTERS:
@@ -1306,6 +1502,7 @@ def cmd_install(_argv=None):
     touch_flag()
     enable_bar_slot()
     install_units()
+    menu_ok = install_menu_trigger()
     print("Installed dashbots.")
     print(
         "Hooks load when a session starts. A session already open, including this one, "
@@ -1313,6 +1510,8 @@ def cmd_install(_argv=None):
         "so the process scan will not draw those sessions either."
     )
     print("Toggle with: omarchy toggle dashbots")
+    if menu_ok:
+        print("The same switch is in the Omarchy menu: Trigger, Toggle, Dashbots.")
     return 0
 
 
@@ -1440,6 +1639,7 @@ def cmd_uninstall(_argv=None):
         target = os.path.realpath(destination)
         if os.path.basename(target) == "dashbots" and target.endswith(os.path.join("bin", "dashbots")):
             os.remove(destination)
+    uninstall_menu_trigger()
     print("Uninstalled dashbots. Session records were left in the state directory.")
     return 0
 
@@ -1478,6 +1678,15 @@ def cmd_status(_argv=None):
         print(f"path unit: {(enabled.stdout or '').strip() or 'unknown'}")
     except (OSError, subprocess.TimeoutExpired):
         print("watcher: unknown")
+    menu_text = ""
+    try:
+        with open(menu_extension_path(), encoding="utf-8") as handle:
+            menu_text = handle.read()
+    except OSError:
+        menu_text = ""
+    menu = parse_menu_jsonc(menu_text) if menu_text else None
+    row = isinstance(menu, dict) and menu.get(MENU_ID) == MENU_ENTRY
+    print(f"menu: {'Trigger, Toggle, Dashbots' if row else 'absent'}")
     print(f"live: {len(live_records())}")
     return 0
 

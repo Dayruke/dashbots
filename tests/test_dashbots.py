@@ -28,8 +28,10 @@ class DashbotsTest(unittest.TestCase):
         self.state.mkdir()
         self.flag = Path(self.tmp.name) / "toggle"
         self.flag.write_text("")
+        self.menu = Path(self.tmp.name) / "omarchy-menu.jsonc"
         os.environ["XDG_STATE_HOME"] = str(self.state)
         os.environ["DASHBOTS_TOGGLE_FILE"] = str(self.flag)
+        os.environ["DASHBOTS_MENU_FILE"] = str(self.menu)
         os.environ["DASHBOTS_HOOK_ASSUME"] = "1"
         os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
         os.environ.pop("GEMINI_SESSION_ID", None)
@@ -427,6 +429,64 @@ class DashbotsTest(unittest.TestCase):
         self.assertIn("x = 10, y = 20", expr)
         self.assertIn("warp_on_change_workspace = 1", expr)
         self.assertTrue(expr.endswith("warp_on_change_workspace = 1 } })"))
+
+    def test_menu_trigger_round_trip(self):
+        sample = """{
+  // Extend the menu.
+
+  "install.ai.grok-bot": { "when": "false" }
+}
+"""
+        self.menu.write_text(sample, encoding="utf-8")
+        self.assertTrue(self.mod.install_menu_trigger())
+        text = self.menu.read_text(encoding="utf-8")
+        self.assertIn("// Extend the menu.", text)
+        parsed = self.mod.parse_menu_jsonc(text)
+        self.assertEqual(parsed["trigger.toggle.dashbots"], self.mod.MENU_ENTRY)
+        self.assertEqual(parsed["install.ai.grok-bot"], {"when": "false"})
+        self.assertTrue(self.mod.install_menu_trigger())
+        self.assertEqual(self.menu.read_text(encoding="utf-8"), text)
+
+        stale = text.replace("omarchy-toggle dashbots", "omarchy-toggle other")
+        self.menu.write_text(stale, encoding="utf-8")
+        self.assertTrue(self.mod.install_menu_trigger())
+        parsed = self.mod.parse_menu_jsonc(self.menu.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["trigger.toggle.dashbots"]["action"], "omarchy-toggle dashbots")
+        self.assertEqual(parsed["install.ai.grok-bot"], {"when": "false"})
+
+        spread = """{
+  "trigger.toggle.dashbots": {
+    "label": "Old"
+  },
+  "install.ai.grok-bot": { "when": "false" }
+}
+"""
+        self.menu.write_text(spread, encoding="utf-8")
+        self.assertTrue(self.mod.install_menu_trigger())
+        parsed = self.mod.parse_menu_jsonc(self.menu.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["trigger.toggle.dashbots"], self.mod.MENU_ENTRY)
+        self.assertEqual(list(parsed), ["install.ai.grok-bot", "trigger.toggle.dashbots"])
+
+        self.assertTrue(self.mod.uninstall_menu_trigger())
+        left = self.menu.read_text(encoding="utf-8")
+        self.assertNotIn("trigger.toggle.dashbots", left)
+        parsed = self.mod.parse_menu_jsonc(left)
+        self.assertEqual(parsed, {"install.ai.grok-bot": {"when": "false"}})
+        self.assertTrue(self.mod.uninstall_menu_trigger())
+
+    def test_menu_trigger_creates_and_skips_invalid(self):
+        self.assertFalse(self.menu.exists())
+        self.assertTrue(self.mod.install_menu_trigger())
+        parsed = self.mod.parse_menu_jsonc(self.menu.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["trigger.toggle.dashbots"]["label"], "Dashbots")
+        self.assertTrue(self.mod.uninstall_menu_trigger())
+        parsed = self.mod.parse_menu_jsonc(self.menu.read_text(encoding="utf-8"))
+        self.assertEqual(parsed, {})
+
+        broken = "{ not json\n"
+        self.menu.write_text(broken, encoding="utf-8")
+        self.assertFalse(self.mod.install_menu_trigger())
+        self.assertEqual(self.menu.read_text(encoding="utf-8"), broken)
 
 
 if __name__ == "__main__":
