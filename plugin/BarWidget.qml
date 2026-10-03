@@ -15,13 +15,35 @@ BarWidget {
   id: root
 
   property bool toggleOn: false
+  property bool listQueued: false
+  property bool flagQueued: false
   property string listText: ""
   property var sessions: []
   property real breath: 1
 
   readonly property string home: Quickshell.env("HOME")
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
+  readonly property string sessionsDir: home + "/.local/state/dashbots/sessions"
   readonly property string binPath: home + "/.local/bin/dashbots"
+  // Blocks until a session file is added, replaced, or removed. Records are
+  // renamed into place, so a status write is a new directory entry. Stdbuf
+  // keeps each name on its own line when stdout is a pipe.
+  readonly property string watchScript:
+    "sessions=$1\n" +
+    "if ! command -v inotifywait >/dev/null 2>&1; then\n" +
+    "  echo 'dashbots: inotifywait is missing' >&2\n" +
+    "  sleep 30\n" +
+    "  exit 1\n" +
+    "fi\n" +
+    "while [[ ! -d \"$sessions\" ]]; do\n" +
+    "  parent=$(dirname -- \"$sessions\")\n" +
+    "  if [[ ! -d \"$parent\" ]]; then parent=$(dirname -- \"$parent\"); fi\n" +
+    "  if [[ ! -d \"$parent\" ]]; then sleep 30; continue; fi\n" +
+    "  inotifywait -q -t 60 -e create,moved_to -- \"$parent\" >/dev/null || true\n" +
+    "done\n" +
+    "cmd=(inotifywait -q -m -e close_write,create,delete,move --format %f -- \"$sessions\")\n" +
+    "if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL \"${cmd[@]}\"; fi\n" +
+    "exec \"${cmd[@]}\"\n"
   readonly property bool anyWorking: {
     var list = root.sessions || []
     for (var i = 0; i < list.length; i++) {
@@ -129,19 +151,89 @@ BarWidget {
     root.sessions = parsed
   }
 
-  function poll() {
-    if (!flagProc.running) flagProc.running = true
+  function refreshFlag() {
+    if (flagProc.running) {
+      root.flagQueued = true
+      return
+    }
+    root.flagQueued = false
+    flagProc.running = true
+  }
+
+  // Temp files from the atomic replace start with a dot. The renamed
+  // record is the only name that should refresh the slot.
+  function noteSessionFile(name) {
+    var file = String(name || "")
+    if (file.length < 6 || file.charAt(0) === ".") return
+    if (file.slice(-5) !== ".json") return
+    if (!root.toggleOn) return
+    listDebounce.restart()
+  }
+
+  function runList() {
+    if (!root.toggleOn) return
+    if (listProc.running) {
+      root.listQueued = true
+      return
+    }
+    root.listQueued = false
+    listProc.buf = ""
+    listProc.running = true
   }
 
   onAnyWorkingChanged: if (!anyWorking) root.breath = 1
 
-  Timer {
-    interval: 1000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: root.poll()
+  onToggleOnChanged: {
+    if (!root.toggleOn) {
+      root.sessions = []
+      root.listText = ""
+      root.listQueued = false
+      listDebounce.stop()
+      if (sessionWatch.running) sessionWatch.running = false
+      return
+    }
+    if (!sessionWatch.running) sessionWatch.running = true
+    root.runList()
   }
+
+  Timer {
+    id: listDebounce
+    interval: 100
+    repeat: false
+    onTriggered: root.runList()
+  }
+
+  Timer {
+    id: sessionWatchRearm
+    interval: 1000
+    onTriggered: {
+      if (root.toggleOn && !sessionWatch.running)
+        sessionWatch.running = true
+    }
+  }
+
+  // Creating or removing this file is the toggle.
+  FileView {
+    id: flagWatch
+    path: root.flagPath
+    watchChanges: true
+    printErrors: false
+    preload: false
+    onFileChanged: root.refreshFlag()
+  }
+
+  Process {
+    id: sessionWatch
+    command: ["bash", "-c", root.watchScript, "dashbots-watch", root.sessionsDir]
+    stdout: SplitParser {
+      onRead: function(line) { root.noteSessionFile(line) }
+    }
+    onExited: function() {
+      if (root.toggleOn) sessionWatchRearm.restart()
+    }
+  }
+
+  Component.onCompleted: root.refreshFlag()
 
   // Size, not a same-color fade. A 16px opacity dip sits next to identical
   // marks and does not read as motion.
@@ -171,17 +263,8 @@ BarWidget {
     command: ["test", "-f", root.flagPath]
     onExited: function(exitCode) {
       var on = exitCode === 0
-      if (root.toggleOn !== on) {
-        root.toggleOn = on
-        if (!on) {
-          root.sessions = []
-          root.listText = ""
-        }
-      }
-      if (on && !listProc.running) {
-        listProc.buf = ""
-        listProc.running = true
-      }
+      if (root.toggleOn !== on) root.toggleOn = on
+      if (root.flagQueued) root.refreshFlag()
     }
   }
 
@@ -198,8 +281,13 @@ BarWidget {
       onRead: function(line) { listProc.buf += line }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
-      root.applyList(listProc.buf)
+      if (root.toggleOn && exitCode === 0)
+        root.applyList(listProc.buf)
+      if (!root.listQueued || !root.toggleOn) {
+        root.listQueued = false
+        return
+      }
+      Qt.callLater(root.runList)
     }
   }
 

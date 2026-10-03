@@ -42,7 +42,7 @@ Each agent session is one JSON record at `$XDG_STATE_HOME/dashbots/sessions/<id>
 
 A process scan covers harnesses that have no adapter yet. But it may only write `alive`, plus the working directory and the terminal window. Codex, Antigravity (`agy`), and OpenCode are scan-only. Antigravity's hook file is not touched.
 
-The bar widget polls `dashbots list` about once a second. `list` prints a JSON array of records whose process is still alive, newest first. Dead pids stay on disk until `dashbots gc` drops them. The watcher runs that, and the scan, while Dashbots is on.
+The bar widget watches the sessions directory and the toggle flag. A record is replaced atomically, and that change runs `dashbots list`. `list` prints a JSON array of records whose process is still alive, newest first. Dead pids stay on disk until `dashbots gc` drops them, and removing the file clears the mark. The watcher runs gc, and the scan, while Dashbots is on.
 
 ## What you see
 
