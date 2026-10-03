@@ -33,8 +33,9 @@ BarWidget {
   property real bob: 0
   // 0..1 across one full cycle. The pose is derived from this.
   property real phase: 0
-  // Smaller only while working, so a 30° lean still fits the slot.
-  readonly property real workingScale: 0.85
+  // Every body uses the size that still fits a 30° lean. Idle and
+  // working stay the same, so a mark does not shrink when it swings.
+  readonly property real iconScale: 0.85
 
   readonly property string home: Quickshell.env("HOME")
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
@@ -439,7 +440,7 @@ BarWidget {
           anchors.centerIn: parent
           width: Style.bar.iconCanvas
           height: Style.bar.iconCanvas
-          scale: button.moving ? root.workingScale : 1
+          scale: root.iconScale
           rotation: button.moving ? root.lean : 0
           anchors.verticalCenterOffset: button.moving ? root.bob : 0
           transformOrigin: Item.Center

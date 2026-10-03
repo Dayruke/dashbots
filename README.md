@@ -36,13 +36,13 @@ graph LR
 	Watcher --> Widget[Bar widget]
 ```
 
-Each agent session is one JSON record at `$XDG_STATE_HOME/dashbots/sessions/<id>.json` (when `XDG_STATE_HOME` is unset, `~/.local/state/dashbots/sessions/`). The fields are `id`, `harness`, `pid`, `cwd`, `title`, `status`, `window`, `updated_at`, `activity`, and `body`. `status` is `alive`, `working`, `waiting`, or `error`. Files are mode `0600` and replaced atomically. This tree is separate from `~/.local/state/omarchy/agents/`, which belongs to Omarchy's own usage meter.
+Each agent session is one JSON record at `$XDG_STATE_HOME/dashbots/sessions/<id>.json` (when `XDG_STATE_HOME` is unset, `~/.local/state/dashbots/sessions/`). The fields are `id`, `harness`, `pid`, `cwd`, `title`, `status`, `window`, `created_at`, `updated_at`, `activity`, and `body`. `status` is `alive`, `working`, `waiting`, or `error`. `created_at` is the first write and stays put. Files are mode `0600` and replaced atomically. This tree is separate from `~/.local/state/omarchy/agents/`, which belongs to Omarchy's own usage meter.
 
 `dashbots` is the reporter. Grok, Claude, Gemini, and Antigravity each get a hook adapter. The adapter checks that the expected harness is actually an ancestor of the hook process, then writes the record. A hook that does not belong to that harness exits without writing. Hooks exit 0 and never block a tool or a turn. Grok and Claude print nothing on stdout. The Gemini adapter prints `{}`, because Gemini treats any other stdout as a system message. The Antigravity adapter prints `{}` as well, and on Stop prints `{"decision":"allow"}`. That Stop value lets the turn end. `{}` on PreToolUse takes no permission decision.
 
 A process scan covers harnesses that have no adapter yet. It may only write `alive`, plus the working directory and the terminal window. Codex and OpenCode are scan-only. Antigravity is the exception that still gets a scan mark: one still mark per `agy` process until a hook writes, and the scan does not change status after that. The hook file is `~/.gemini/config/hooks.json`. One named hook, `dashbots`, is merged into it. `~/.gemini/antigravity-cli/` is left alone. An Antigravity mark is one per process (`agy-<pid>`), and Stop does not remove it. The mark goes away when the process exits.
 
-The bar widget watches the sessions directory and the toggle flag. A record is replaced atomically, and that change runs `dashbots list`. `list` prints a JSON array of records whose process is still alive, newest first. Dead pids stay on disk until `dashbots gc` drops them, and removing the file clears the mark. The watcher runs gc, and the scan, while Dashbots is on.
+The bar widget watches the sessions directory and the toggle flag. A record is replaced atomically, and that change runs `dashbots list`. `list` prints a JSON array of records whose process is still alive, newest session first. That order is when the session first appeared. Going idle, working, or waiting does not move the mark. A session that starts later is added at the front. Dead pids stay on disk until `dashbots gc` drops them, and removing the file clears the mark. The watcher runs gc, and the scan, while Dashbots is on.
 
 ## What you see
 
@@ -58,7 +58,7 @@ Left click focuses that session's terminal and switches to its workspace. The po
 
 Each mark is a white SVG. The bar mixes that white with a theme color, so the body is never a fixed hex. The eyes are holes punched out of the shape.
 
-A new session gets one of the four bodies at random: circle, blob, triangle, or square. A shape already on the bar is not used again until every shape is taken. The pick stays with that session. The harness name is in the hover, not in the shape.
+A new session gets one of the four bodies at random: circle, blob, triangle, or square. A shape already on the bar is not used again until every shape is taken. The pick stays with that session. The harness name is in the hover, not in the shape. Every body is drawn at 85% of the icon canvas, the size that still fits a 30° lean, so starting or stopping the swing does not change how big the mark is.
 
 | Eyes | What it means |
 | --- | --- |

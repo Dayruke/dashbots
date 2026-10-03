@@ -338,6 +338,83 @@ class DashbotsTest(unittest.TestCase):
         finally:
             self.mod.pid_alive = real_alive
 
+    def test_status_change_keeps_the_mark_in_place(self):
+        real_alive = self.mod.pid_alive
+        self.mod.pid_alive = lambda pid: int(pid) in (11, 22)
+        try:
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:01Z"
+            self.mod.write_record({
+                "id": "older",
+                "harness": "grok",
+                "pid": 11,
+                "cwd": "/work/a",
+                "title": "a",
+                "status": "waiting",
+                "window": "",
+                "updated_at": "",
+                "activity": "idle",
+                "source": "hook",
+                "turn": "",
+            })
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:02Z"
+            self.mod.write_record({
+                "id": "newer",
+                "harness": "grok",
+                "pid": 22,
+                "cwd": "/work/b",
+                "title": "b",
+                "status": "waiting",
+                "window": "",
+                "updated_at": "",
+                "activity": "idle",
+                "source": "hook",
+                "turn": "",
+            })
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:03Z"
+            older = self.record("older")
+            older["status"] = "working"
+            older["activity"] = "working"
+            self.mod.write_record(older)
+            listed = self.mod.live_records()
+            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+            stored = self.record("older")
+            self.assertEqual(stored["created_at"], "2026-01-01T00:00:01Z")
+            self.assertEqual(stored["updated_at"], "2026-01-01T00:00:03Z")
+            self.assertEqual(stored["status"], "working")
+            self.assertEqual(self.record("newer")["created_at"], "2026-01-01T00:00:02Z")
+        finally:
+            self.mod.pid_alive = real_alive
+
+    def test_old_record_keeps_its_place_when_created_at_is_missing(self):
+        real_alive = self.mod.pid_alive
+        self.mod.pid_alive = lambda pid: True
+        try:
+            path = Path(self.mod.session_path("kept"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "id": "kept",
+                "harness": "grok",
+                "pid": 11,
+                "cwd": "/work/a",
+                "title": "a",
+                "status": "waiting",
+                "window": "",
+                "updated_at": "2026-01-01T00:00:01Z",
+                "activity": "idle",
+                "source": "hook",
+                "turn": "",
+            }))
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:09Z"
+            current = self.record("kept")
+            current["status"] = "working"
+            self.mod.write_record(current)
+            stored = self.record("kept")
+            self.assertEqual(stored["created_at"], "2026-01-01T00:00:01Z")
+            self.assertEqual(stored["updated_at"], "2026-01-01T00:00:09Z")
+            self.assertEqual([item["id"] for item in self.mod.live_records()], ["kept"])
+        finally:
+            self.mod.pid_alive = real_alive
+
     def test_new_session_replaces_the_previous_mark_on_that_pid(self):
         self.mod.now_stamp = lambda: "2026-01-01T00:00:01Z"
         self.hook({"hook_event_name": "SessionStart", "sessionId": "old", "cwd": "/work/demo"})

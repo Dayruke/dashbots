@@ -313,6 +313,20 @@ def ensure_body(record):
     return record["body"]
 
 
+def keep_created_at(previous, record, stamp):
+    """First appearance. A later status write must not move the mark."""
+    if isinstance(previous, dict):
+        kept = str(previous.get("created_at") or "")
+        if kept:
+            return kept
+        # Records written before this field existed keep their old place.
+        kept = str(previous.get("updated_at") or "")
+        if kept:
+            return kept
+    incoming = str(record.get("created_at") or "")
+    return incoming or stamp
+
+
 def write_record(record):
     session_id = sanitize_id(record.get("id"))
     if not session_id:
@@ -320,9 +334,12 @@ def write_record(record):
     record = dict(record)
     record["id"] = session_id
     ensure_body(record)
-    record["updated_at"] = now_stamp()
-    ensure_private_dir(sessions_dir())
     destination = session_path(session_id)
+    previous = read_record(destination)
+    stamp = now_stamp()
+    record["created_at"] = keep_created_at(previous, record, stamp)
+    record["updated_at"] = stamp
+    ensure_private_dir(sessions_dir())
     fd, tmp = tempfile.mkstemp(dir=sessions_dir(), prefix=".tmp-")
     try:
         os.fchmod(fd, 0o600)
@@ -916,12 +933,21 @@ def apply_hook(payload, harness):
     return 0
 
 
+def slot_stamp(record):
+    """Order key. created_at stays put across status changes."""
+    return str(record.get("created_at") or record.get("updated_at") or "")
+
+
 def live_records():
     found = []
     for record in iter_records():
         if pid_alive(record.get("pid")):
             found.append(record)
-    found.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    # Newest session first. A status change does not change this order.
+    found.sort(
+        key=lambda item: (slot_stamp(item), str(item.get("id") or "")),
+        reverse=True,
+    )
     return found
 
 
