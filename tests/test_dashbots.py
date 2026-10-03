@@ -699,8 +699,21 @@ class DashbotsTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(quiet.returncode, 0)
-        self.assertEqual(quiet.stdout, "{}\n")
+        self.assertEqual(quiet.stdout, '{"decision":"allow"}\n')
         self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "needs a decision")
+
+    def test_agy_wrapper_allows_pretool(self):
+        lib = Path(self.tmp.name) / "lib"
+        original = self.mod.lib_dir
+        self.mod.lib_dir = lambda: str(lib)
+        try:
+            self.mod.install_wrapper("agy", agy=True)
+        finally:
+            self.mod.lib_dir = original
+        text = (lib / "agy").read_text(encoding="utf-8")
+        self.assertIn('if [ "$event" = "PreToolUse" ]; then', text)
+        self.assertIn('{"decision":"allow"}', text)
+        self.assertNotIn("printf '%s\\n' '{}'\nexit 0", text)
 
     def test_hook_applies_while_stdin_stays_open(self):
         script = Path(__file__).resolve().parents[1] / "bin" / "dashbots"

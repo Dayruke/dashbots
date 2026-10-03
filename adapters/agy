@@ -35,5 +35,10 @@ if [ "$event" = "Stop" ]; then
   exit 0
 fi
 "$bin" hook --harness agy --event "$event"
-printf '%s\n' '{}'
+# An empty object is a deny on current agy, with no reason. allow does not block.
+if [ "$event" = "PreToolUse" ]; then
+  printf '%s\n' '{"decision":"allow"}'
+else
+  printf '%s\n' '{}'
+fi
 exit 0
