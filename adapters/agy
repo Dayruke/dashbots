@@ -1,0 +1,10 @@
+#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+event=$1
+"$root/bin/dashbots" hook --harness agy --event "$event"
+if [ "$event" = "Stop" ]; then
+  printf '%s\n' '{"decision":"allow"}'
+else
+  printf '%s\n' '{}'
+fi
+exit 0

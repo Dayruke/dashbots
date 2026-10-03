@@ -2,7 +2,8 @@
 """Dashbots reporter. One record shape, every harness.
 
 Hooks must exit 0 and stay quiet on stdout. The Gemini adapter prints {}
-itself. Debug goes to stderr only when DASHBOTS_DEBUG is set.
+itself. The Antigravity adapter prints {} too, and on Stop prints a decision
+that lets the turn end. Debug goes to stderr only when DASHBOTS_DEBUG is set.
 """
 
 import json
@@ -22,7 +23,7 @@ ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 HARNESS_RE = re.compile(r"[a-z0-9_-]{1,32}")
 STATUSES = ("alive", "working", "waiting", "error")
 BODIES = ("circle", "blob", "triangle", "square")
-ADAPTERS = ("grok", "claude", "gemini")
+ADAPTERS = ("grok", "claude", "gemini", "agy")
 SCAN_NAMES = ("grok", "claude", "gemini", "agy", "codex", "opencode")
 
 SNAKE_EVENTS = {
@@ -69,6 +70,15 @@ GEMINI_EVENTS = (
 )
 NEW_TURN_EVENTS = {"UserPromptSubmit", "BeforeAgent"}
 STOP_EVENTS = {"Stop", "StopCancelled", "AfterAgent"}
+AGY_EVENTS = (
+    "PreInvocation",
+    "PreToolUse",
+    "PostToolUse",
+    "PostInvocation",
+    "Stop",
+)
+AGY_ASK_TOOLS = {"ask_question", "ask_permission"}
+AGY_HOOK_KEY = "dashbots"
 
 
 def debug(msg):
@@ -566,6 +576,80 @@ def delete_scan_twin(pid):
                 pass
 
 
+def agy_cwd(payload):
+    paths = payload.get("workspacePaths")
+    if isinstance(paths, list):
+        for item in paths:
+            if item:
+                return str(item)
+    return str(field(payload, "cwd", "workspaceRoot", "workspace_root", default="") or "")
+
+
+def agy_tool_name(payload):
+    call = payload.get("toolCall")
+    if isinstance(call, dict) and call.get("name"):
+        return first_line(call.get("name"))
+    return tool_name(payload)
+
+
+def agy_stop_error(payload):
+    if payload.get("error"):
+        return True
+    return str(payload.get("terminationReason") or "") == "error"
+
+
+def agy_fully_idle(payload):
+    if "fullyIdle" not in payload:
+        return True
+    return bool(payload.get("fullyIdle"))
+
+
+def apply_agy(payload, pid):
+    """One mark per agy process. Stop leaves the record until the process exits."""
+    name = event_name(payload)
+    if name not in AGY_EVENTS:
+        return 0
+    session_id = sanitize_id(f"agy-{int(pid)}")
+    if not session_id:
+        return 0
+    cwd = agy_cwd(payload)
+    record = load_or_blank(session_id, "agy", pid, cwd)
+    window = window_for(pid)
+    if window:
+        record["window"] = window
+    elif "window" not in record:
+        record["window"] = ""
+    tool = agy_tool_name(payload)
+    if name == "PreInvocation":
+        record["status"] = "working"
+        record["activity"] = "thinking"
+    elif name == "PreToolUse":
+        if tool in AGY_ASK_TOOLS:
+            record["status"] = "waiting"
+            record["activity"] = "needs a decision"
+        else:
+            record["status"] = "working"
+            record["activity"] = tool or "working"
+    elif name == "PostToolUse":
+        record["status"] = "working"
+        if tool:
+            record["activity"] = tool
+    elif name == "PostInvocation":
+        record["status"] = "working"
+    elif name == "Stop":
+        if agy_stop_error(payload):
+            record["status"] = "error"
+            record["activity"] = "error"
+        else:
+            record["status"] = "waiting"
+            record["activity"] = "idle" if agy_fully_idle(payload) else "background still running"
+    else:
+        return 0
+    delete_scan_twin(pid)
+    write_record(record)
+    return 0
+
+
 def apply_hook(payload, harness):
     """Apply one hook payload. Always meant to be followed by exit 0."""
     if not isinstance(payload, dict):
@@ -580,6 +664,8 @@ def apply_hook(payload, harness):
     pid = hook_pid(harness)
     if not pid:
         return 0
+    if harness == "agy":
+        return apply_agy(payload, pid)
     session_id = session_id_of(payload)
     name = event_name(payload)
     if name == "SessionEnd":
@@ -809,13 +895,31 @@ def cmd_gc(_argv=None):
     directory = sessions_dir()
     if not os.path.isdir(directory):
         return 0
-    for record in list(iter_records()):
+    records = list(iter_records())
+    hooked = set()
+    for record in records:
+        if record.get("source") != "hook":
+            continue
+        harness = sanitize_harness(record.get("harness"))
+        try:
+            hooked.add((harness, int(record.get("pid"))))
+        except (TypeError, ValueError):
+            continue
+    for record in records:
         session_id = sanitize_id(record.get("id"))
         if not session_id:
             continue
         drop = not pid_alive(record.get("pid"))
         if record.get("source") == "scan" and has_marker(record.get("harness")):
-            drop = True
+            harness = sanitize_harness(record.get("harness"))
+            try:
+                pid = int(record.get("pid"))
+            except (TypeError, ValueError):
+                pid = None
+            # Antigravity has no session-start hook. A scan mark is the idle
+            # presence until a hook record for that pid exists.
+            if harness != "agy" or (harness, pid) in hooked:
+                drop = True
         if drop:
             delete_record(session_id)
     return 0
@@ -828,13 +932,71 @@ def has_marker(harness):
     return os.path.isfile(os.path.join(adapters_dir(), harness))
 
 
+def _refresh_presence(record, pid, cwd, clients):
+    """Update the window and directory. Leave status and activity alone."""
+    window = window_for(pid, clients)
+    title = title_of(cwd, record.get("harness"))
+    cwd = cwd or ""
+    if record.get("cwd") == cwd and record.get("title") == title and record.get("window") == window:
+        return
+    updated = dict(record)
+    updated["cwd"] = cwd
+    updated["title"] = title
+    updated["window"] = window
+    write_record(updated)
+
+
+def ensure_agy_presence(clients, pids):
+    """A still mark for each agy process that no hook has claimed yet."""
+    grouped = {}
+    for record in iter_records():
+        if sanitize_harness(record.get("harness")) != "agy":
+            continue
+        try:
+            pid = int(record.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(pid, []).append(record)
+    for pid in pids:
+        if not pid_alive(pid):
+            continue
+        found = grouped.get(pid, [])
+        hooks = [record for record in found if record.get("source") == "hook"]
+        scans = [record for record in found if record.get("source") == "scan"]
+        cwd = cwd_of(pid)
+        if hooks:
+            for scan in scans:
+                delete_record(scan.get("id"))
+            _refresh_presence(hooks[0], pid, cwd, clients)
+            continue
+        if scans:
+            _refresh_presence(scans[0], pid, cwd, clients)
+            continue
+        session_id = sanitize_id(f"scan-agy-{pid}")
+        if not session_id:
+            continue
+        record = blank_record(session_id, "agy", pid, cwd)
+        record["source"] = "scan"
+        record["status"] = "alive"
+        record["activity"] = ""
+        record["window"] = window_for(pid, clients)
+        record["title"] = title_of(cwd, "agy")
+        write_record(record)
+
+
 def cmd_scan(_argv=None):
     if not toggle_on():
         return 0
     clients = hypr_clients()
+    agy_pids = []
     for pid in iter_pids():
         harness = harness_of(pid)
-        if not harness or has_marker(harness) or not pid_alive(pid):
+        if not harness or not pid_alive(pid):
+            continue
+        if harness == "agy":
+            agy_pids.append(pid)
+            continue
+        if has_marker(harness):
             continue
         cwd = cwd_of(pid)
         session_id = sanitize_id(f"scan-{harness}-{pid}")
@@ -850,6 +1012,7 @@ def cmd_scan(_argv=None):
         if previous and _scan_unchanged(previous, record):
             continue
         write_record(record)
+    ensure_agy_presence(clients, agy_pids)
     return 0
 
 
@@ -932,10 +1095,17 @@ def cmd_report(argv):
 def cmd_hook(argv):
     try:
         harness = flag_value(argv, "--harness") or ""
+        event = flag_value(argv, "--event") or ""
         raw = sys.stdin.read()
         if not raw.strip():
             return 0
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return 0
+        # Antigravity stdin has no event name. The hook command carries it.
+        if event and not event_name(payload):
+            payload = dict(payload)
+            payload["hook_event_name"] = event
         apply_hook(payload, harness)
     except Exception:
         if os.environ.get("DASHBOTS_DEBUG"):
@@ -1014,7 +1184,7 @@ def write_json(path, data):
         raise
 
 
-def install_wrapper(harness, gemini=False):
+def install_wrapper(harness, gemini=False, agy=False):
     ensure_private_dir(os.path.dirname(lib_dir()))
     os.makedirs(lib_dir(), exist_ok=True)
     path = os.path.join(lib_dir(), harness)
@@ -1022,7 +1192,18 @@ def install_wrapper(harness, gemini=False):
         "#!/bin/sh",
         f'bin="$HOME/.local/bin/dashbots"',
     ]
-    if gemini:
+    if agy:
+        # PreToolUse stdout is a permission decision. {} takes no decision.
+        # Stop must not print "continue", or the turn would not end.
+        lines.append("event=$1")
+        lines.append('"$bin" hook --harness agy --event "$event"')
+        lines.append('if [ "$event" = "Stop" ]; then')
+        lines.append("  printf '%s\\n' '{\"decision\":\"allow\"}'")
+        lines.append("else")
+        lines.append("  printf '%s\\n' '{}'")
+        lines.append("fi")
+        lines.append("exit 0")
+    elif gemini:
         lines.append(f'"$bin" hook --harness {harness}')
         lines.append("printf '%s\\n' '{}'")
         lines.append("exit 0")
@@ -1065,6 +1246,86 @@ def write_markers():
         fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
         os.chmod(path, 0o600)
+
+
+def agy_hooks_path():
+    override = os.environ.get("DASHBOTS_AGY_HOOKS_FILE")
+    if override:
+        return override
+    return os.path.join(home(), ".gemini", "config", "hooks.json")
+
+
+def agy_hook_command(event):
+    command = os.path.join(lib_dir(), "agy") + " " + event
+    return {"type": "command", "command": command, "timeout": 5}
+
+
+def agy_hook_entry():
+    entry = {}
+    for event in ("PreToolUse", "PostToolUse"):
+        entry[event] = [{"matcher": "*", "hooks": [agy_hook_command(event)]}]
+    for event in ("PreInvocation", "PostInvocation", "Stop"):
+        entry[event] = [agy_hook_command(event)]
+    return entry
+
+
+def agy_commands(entry):
+    if not isinstance(entry, dict):
+        return
+    for groups in entry.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if group.get("command"):
+                yield str(group.get("command") or "")
+            for hook in group.get("hooks") or []:
+                if isinstance(hook, dict) and hook.get("command"):
+                    yield str(hook.get("command") or "")
+
+
+def agy_entry_is_ours(entry):
+    commands = list(agy_commands(entry))
+    return bool(commands) and all("/lib/dashbots/agy" in command for command in commands)
+
+
+def merge_agy_hooks(settings):
+    if not isinstance(settings, dict):
+        settings = {}
+    settings[AGY_HOOK_KEY] = agy_hook_entry()
+    return settings
+
+
+def install_agy_hooks():
+    path = agy_hooks_path()
+    loaded = load_json_object(path)
+    if loaded is None:
+        print(f"skipped agy: {path} is not strict JSON", file=sys.stderr)
+        return False
+    write_json(path, merge_agy_hooks(loaded))
+    return True
+
+
+def uninstall_agy_hooks():
+    path = agy_hooks_path()
+    if not os.path.exists(path):
+        return
+    loaded = load_json_object(path)
+    if loaded is None:
+        print(f"skipped agy: {path} is not strict JSON", file=sys.stderr)
+        return
+    entry = loaded.get(AGY_HOOK_KEY)
+    if not agy_entry_is_ours(entry):
+        return
+    loaded.pop(AGY_HOOK_KEY, None)
+    if loaded:
+        write_json(path, loaded)
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def install_grok_hooks():
@@ -1472,8 +1733,9 @@ def uninstall_menu_trigger():
 def cmd_install(_argv=None):
     install_bin_link()
     for harness in ADAPTERS:
-        install_wrapper(harness, gemini=(harness == "gemini"))
+        install_wrapper(harness, gemini=(harness == "gemini"), agy=(harness == "agy"))
     install_grok_hooks()
+    install_agy_hooks()
     install_settings_hooks(
         os.path.join(home(), ".claude", "settings.json"),
         "claude",
@@ -1506,8 +1768,9 @@ def cmd_install(_argv=None):
     print("Installed dashbots.")
     print(
         "Hooks load when a session starts. A session already open, including this one, "
-        "will not report until it is restarted. Grok, Claude, and Gemini now have adapters, "
-        "so the process scan will not draw those sessions either."
+        "will not report until it is restarted. Grok, Claude, and Gemini are not drawn "
+        "by the process scan. Antigravity keeps a still mark until that process is "
+        "restarted and a hook fires."
     )
     print("Toggle with: omarchy toggle dashbots")
     if menu_ok:
@@ -1627,6 +1890,7 @@ def cmd_uninstall(_argv=None):
         pass
     uninstall_settings(os.path.join(home(), ".claude", "settings.json"), "claude")
     uninstall_settings(os.path.join(home(), ".gemini", "settings.json"), "gemini")
+    uninstall_agy_hooks()
     if os.path.isdir(lib_dir()):
         shutil.rmtree(lib_dir())
     for harness in ADAPTERS:

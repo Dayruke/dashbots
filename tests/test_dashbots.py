@@ -35,6 +35,7 @@ class DashbotsTest(unittest.TestCase):
         os.environ["DASHBOTS_HOOK_ASSUME"] = "1"
         os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
         os.environ.pop("GEMINI_SESSION_ID", None)
+        os.environ.pop("DASHBOTS_AGY_HOOKS_FILE", None)
         self._now_stamp = self.mod.now_stamp
         self._hypr_clients = self.mod.hypr_clients
         self.mod.hypr_clients = lambda: []
@@ -386,6 +387,266 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(self.record("quiet")["status"], "alive")
+
+    def test_agy_status_map(self):
+        pid = os.getpid()
+        session = f"agy-{pid}"
+        twin = f"scan-agy-{pid}"
+        self.mod.write_record({
+            "id": twin,
+            "harness": "agy",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "alive",
+            "window": "",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "activity": "",
+            "source": "scan",
+            "turn": "",
+        })
+        self.hook({
+            "hook_event_name": "PreInvocation",
+            "conversationId": "conv-a",
+            "workspacePaths": ["/work/demo"],
+        }, "agy")
+        rec = self.record(session)
+        self.assertEqual(rec["status"], "working")
+        self.assertEqual(rec["activity"], "thinking")
+        self.assertEqual(rec["cwd"], "/work/demo")
+        self.assertEqual(rec["source"], "hook")
+        self.assertIsNone(self.record(twin))
+        self.assertIsNone(self.record("conv-a"))
+
+        self.hook({
+            "hook_event_name": "PreInvocation",
+            "conversationId": "conv-b",
+            "workspacePaths": ["/work/other"],
+        }, "agy")
+        self.assertEqual(self.record(session)["cwd"], "/work/other")
+        self.assertIsNone(self.record("conv-b"))
+
+        self.hook({
+            "hook_event_name": "PreToolUse",
+            "toolCall": {"name": "run_command", "args": {}},
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "working")
+        self.assertEqual(self.record(session)["activity"], "run_command")
+
+        self.hook({
+            "hook_event_name": "PostToolUse",
+            "toolCall": {"name": "run_command"},
+            "error": "exit status 1",
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "working")
+        self.assertEqual(self.record(session)["activity"], "run_command")
+
+        self.hook({
+            "hook_event_name": "PreToolUse",
+            "toolCall": {"name": "ask_question"},
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "waiting")
+        self.assertEqual(self.record(session)["activity"], "needs a decision")
+
+        self.hook({
+            "hook_event_name": "PostToolUse",
+            "toolCall": {"name": "ask_permission"},
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "working")
+        self.assertEqual(self.record(session)["activity"], "ask_permission")
+
+        self.hook({"hook_event_name": "PostInvocation"}, "agy")
+        self.assertEqual(self.record(session)["status"], "working")
+        self.assertEqual(self.record(session)["activity"], "ask_permission")
+
+        self.hook({
+            "hook_event_name": "Stop",
+            "terminationReason": "model_stop",
+            "fullyIdle": False,
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "waiting")
+        self.assertEqual(self.record(session)["activity"], "background still running")
+
+        self.hook({
+            "hook_event_name": "Stop",
+            "terminationReason": "model_stop",
+            "fullyIdle": True,
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "waiting")
+        self.assertEqual(self.record(session)["activity"], "idle")
+
+        self.hook({
+            "hook_event_name": "Stop",
+            "terminationReason": "error",
+            "error": "boom",
+            "fullyIdle": True,
+        }, "agy")
+        self.assertEqual(self.record(session)["status"], "error")
+        self.assertEqual(self.record(session)["activity"], "error")
+        self.assertIsNotNone(self.record(session))
+
+    def test_agy_event_flag_and_adapter_stdout(self):
+        script = Path(__file__).resolve().parents[1] / "bin" / "dashbots"
+        adapter = Path(__file__).resolve().parents[1] / "adapters" / "agy"
+        env = os.environ.copy()
+        env["DASHBOTS_HOOK_ASSUME"] = "1"
+        env["DASHBOTS_HOOK_PID"] = str(os.getpid())
+        result = subprocess.run(
+            [str(script), "hook", "--harness", "agy", "--event", "PreInvocation"],
+            input=json.dumps({"conversationId": "conv-1", "workspacePaths": ["/work/demo"]}),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.record(f"agy-{os.getpid()}")["status"], "working")
+
+        stopped = subprocess.run(
+            [str(adapter), "Stop"],
+            input=json.dumps({
+                "conversationId": "conv-1",
+                "workspacePaths": ["/work/demo"],
+                "terminationReason": "model_stop",
+                "fullyIdle": True,
+            }),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(stopped.returncode, 0)
+        self.assertEqual(stopped.stdout, '{"decision":"allow"}\n')
+        self.assertEqual(self.record(f"agy-{os.getpid()}")["status"], "waiting")
+        self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "idle")
+
+        quiet = subprocess.run(
+            [str(adapter), "PreToolUse"],
+            input=json.dumps({
+                "toolCall": {"name": "ask_permission"},
+                "workspacePaths": ["/work/demo"],
+            }),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(quiet.returncode, 0)
+        self.assertEqual(quiet.stdout, "{}\n")
+        self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "needs a decision")
+
+    def test_agy_presence_does_not_clobber_status(self):
+        pid = os.getpid()
+        originals = (self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of)
+        self.mod.iter_pids = lambda: [pid]
+        self.mod.harness_of = lambda candidate: "agy" if candidate == pid else None
+        self.mod.cwd_of = lambda _candidate: "/work/demo"
+        try:
+            self.assertEqual(self.mod.cmd_scan(["scan"]), 0)
+            rec = self.record(f"scan-agy-{pid}")
+            self.assertEqual(rec["status"], "alive")
+            self.assertEqual(rec["source"], "scan")
+            self.assertEqual(rec["title"], "demo")
+            self.mod.now_stamp = lambda: "2099-01-01T00:00:00Z"
+            self.assertEqual(self.mod.cmd_scan(["scan"]), 0)
+            again = self.record(f"scan-agy-{pid}")
+            self.assertEqual(again["status"], "alive")
+            self.assertNotEqual(again["updated_at"], "2099-01-01T00:00:00Z")
+        finally:
+            self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of = originals
+
+    def test_agy_gc_keeps_presence_until_a_hook_exists(self):
+        pid = os.getpid()
+        marker = Path(self.mod.adapters_dir())
+        marker.mkdir(parents=True)
+        (marker / "agy").write_text("")
+        (marker / "grok").write_text("")
+        self.mod.write_record({
+            "id": f"scan-agy-{pid}",
+            "harness": "agy",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "alive",
+            "window": "",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "activity": "",
+            "source": "scan",
+            "turn": "",
+        })
+        self.mod.write_record({
+            "id": f"scan-grok-{pid}",
+            "harness": "grok",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "alive",
+            "window": "",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "activity": "",
+            "source": "scan",
+            "turn": "",
+        })
+        self.assertEqual(self.mod.cmd_gc(["gc"]), 0)
+        self.assertIsNotNone(self.record(f"scan-agy-{pid}"))
+        self.assertIsNone(self.record(f"scan-grok-{pid}"))
+
+        self.hook({
+            "hook_event_name": "PreInvocation",
+            "workspacePaths": ["/work/demo"],
+        }, "agy")
+        self.assertIsNone(self.record(f"scan-agy-{pid}"))
+        self.mod.write_record({
+            "id": f"scan-agy-{pid}",
+            "harness": "agy",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "alive",
+            "window": "",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "activity": "",
+            "source": "scan",
+            "turn": "",
+        })
+        self.assertEqual(self.mod.cmd_gc(["gc"]), 0)
+        self.assertIsNone(self.record(f"scan-agy-{pid}"))
+        self.assertEqual(self.record(f"agy-{pid}")["status"], "working")
+
+    def test_agy_hook_merge_keeps_other_hooks(self):
+        path = Path(self.tmp.name) / "hooks.json"
+        path.write_text(json.dumps({
+            "lint": {
+                "PostToolUse": [{
+                    "matcher": "run_command",
+                    "hooks": [{"command": "./lint.sh"}],
+                }],
+            },
+        }), encoding="utf-8")
+        os.environ["DASHBOTS_AGY_HOOKS_FILE"] = str(path)
+        self.assertTrue(self.mod.install_agy_hooks())
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["lint"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh")
+        entry = data["dashbots"]
+        self.assertEqual(entry["PreToolUse"][0]["matcher"], "*")
+        self.assertTrue(entry["PreToolUse"][0]["hooks"][0]["command"].endswith("agy PreToolUse"))
+        self.assertTrue(entry["Stop"][0]["command"].endswith("agy Stop"))
+        self.assertEqual(entry["Stop"][0]["timeout"], 5)
+        self.assertTrue(self.mod.install_agy_hooks())
+        again = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(again["lint"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh")
+        self.assertEqual(len(again["dashbots"]["PreInvocation"]), 1)
+        self.mod.uninstall_agy_hooks()
+        left = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("dashbots", left)
+        self.assertIn("lint", left)
+
+        bad = Path(self.tmp.name) / "bad.json"
+        bad.write_text("{", encoding="utf-8")
+        os.environ["DASHBOTS_AGY_HOOKS_FILE"] = str(bad)
+        self.assertFalse(self.mod.install_agy_hooks())
+        self.assertEqual(bad.read_text(encoding="utf-8"), "{")
 
     def test_focus_keeps_the_pointer_and_restores_warps(self):
         lua = self.mod.focus_lua("0xabc", (12, -4), "true", "1")
