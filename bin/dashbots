@@ -476,7 +476,11 @@ def classify_args(args, comm):
 
 
 def harness_of(pid):
-    return classify_args(cmdline(pid), comm_of(pid))
+    # comm is one short read. Only a harness name or node (Gemini) needs cmdline.
+    comm = comm_of(pid)
+    if comm not in SCAN_NAMES and comm not in ("node", "nodejs"):
+        return None
+    return classify_args(cmdline(pid), comm)
 
 
 def find_ancestor(harness, start_pid):
@@ -1122,9 +1126,8 @@ def has_marker(harness):
     return os.path.isfile(os.path.join(adapters_dir(), harness))
 
 
-def _refresh_presence(record, pid, cwd, clients):
+def _refresh_presence(record, cwd, window):
     """Update the window and directory. Leave status and activity alone."""
-    window = window_for(pid, clients)
     title = title_of(cwd, record.get("harness"))
     cwd = cwd or ""
     if record.get("cwd") == cwd and record.get("title") == title and record.get("window") == window:
@@ -1136,8 +1139,13 @@ def _refresh_presence(record, pid, cwd, clients):
     write_record(updated)
 
 
-def ensure_agy_presence(clients, pids):
-    """A still mark for each agy process that no hook has claimed yet."""
+def ensure_agy_presence(window, pids):
+    """A still mark for each agy process that no hook has claimed yet.
+
+    window is a function from pid to a window address.
+    """
+    if not pids:
+        return
     grouped = {}
     for record in iter_records():
         if sanitize_harness(record.get("harness")) != "agy":
@@ -1157,10 +1165,10 @@ def ensure_agy_presence(clients, pids):
         if hooks:
             for scan in scans:
                 delete_record(scan.get("id"))
-            _refresh_presence(hooks[0], pid, cwd, clients)
+            _refresh_presence(hooks[0], cwd, window(pid))
             continue
         if scans:
-            _refresh_presence(scans[0], pid, cwd, clients)
+            _refresh_presence(scans[0], cwd, window(pid))
             continue
         session_id = sanitize_id(f"scan-agy-{pid}")
         if not session_id:
@@ -1169,41 +1177,92 @@ def ensure_agy_presence(clients, pids):
         record["source"] = "scan"
         record["status"] = "alive"
         record["activity"] = ""
-        record["window"] = window_for(pid, clients)
+        record["window"] = window(pid)
         record["title"] = title_of(cwd, "agy")
         write_record(record)
 
 
-def cmd_scan(_argv=None):
-    if not toggle_on():
+# A pid keeps its harness for life, so the watcher classifies a pid once.
+# Every RECHECK_SECONDS it reads every pid again. That catches a process that
+# exec'd in place, or one read between fork and exec.
+RECHECK_SECONDS = 30
+# A pid with no window (tmux, a window still mapping) asks hyprctl at most this often.
+WINDOW_RETRY_SECONDS = 10
+
+
+class Scanner:
+    """Discovery walk. One instance lives as long as the watcher."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.harnesses = {}
+        self.windows = {}
+        self.last_full = None
+        self.clients = None
+
+    def _found(self, now):
+        full = self.last_full is None or now - self.last_full >= RECHECK_SECONDS
+        if full:
+            self.last_full = now
+            self.windows = {}
+        known = self.harnesses
+        current = {}
+        for pid in iter_pids():
+            if not full and pid in known:
+                current[pid] = known[pid]
+            else:
+                current[pid] = harness_of(pid)
+        self.harnesses = current
+        self.windows = {pid: seen for pid, seen in self.windows.items() if pid in current}
+        return [(pid, harness) for pid, harness in current.items() if harness]
+
+    def window(self, pid, now):
+        cached = self.windows.get(pid)
+        if cached and (cached[0] or now - cached[1] < WINDOW_RETRY_SECONDS):
+            return cached[0]
+        if self.clients is None:
+            self.clients = hypr_clients()
+        address = window_for(pid, self.clients)
+        self.windows[pid] = (address, now)
+        return address
+
+    def scan(self):
+        if not toggle_on():
+            return 0
+        now = self.clock()
+        self.clients = None
+        agy_pids = []
+        try:
+            for pid, harness in self._found(now):
+                if not pid_alive(pid):
+                    continue
+                if harness == "agy":
+                    agy_pids.append(pid)
+                    continue
+                if has_marker(harness):
+                    continue
+                cwd = cwd_of(pid)
+                session_id = sanitize_id(f"scan-{harness}-{pid}")
+                if not session_id:
+                    continue
+                record = blank_record(session_id, harness, pid, cwd)
+                record["source"] = "scan"
+                record["status"] = "alive"
+                record["activity"] = ""
+                record["window"] = self.window(pid, now)
+                record["title"] = title_of(cwd, harness)
+                previous = read_record(session_path(session_id))
+                if previous and _scan_unchanged(previous, record):
+                    continue
+                write_record(record)
+            ensure_agy_presence(lambda pid: self.window(pid, now), agy_pids)
+        finally:
+            self.clients = None
         return 0
-    clients = hypr_clients()
-    agy_pids = []
-    for pid in iter_pids():
-        harness = harness_of(pid)
-        if not harness or not pid_alive(pid):
-            continue
-        if harness == "agy":
-            agy_pids.append(pid)
-            continue
-        if has_marker(harness):
-            continue
-        cwd = cwd_of(pid)
-        session_id = sanitize_id(f"scan-{harness}-{pid}")
-        if not session_id:
-            continue
-        record = blank_record(session_id, harness, pid, cwd)
-        record["source"] = "scan"
-        record["status"] = "alive"
-        record["activity"] = ""
-        record["window"] = window_for(pid, clients)
-        record["title"] = title_of(cwd, harness)
-        previous = read_record(session_path(session_id))
-        if previous and _scan_unchanged(previous, record):
-            continue
-        write_record(record)
-    ensure_agy_presence(clients, agy_pids)
-    return 0
+
+
+def cmd_scan(_argv=None):
+    return Scanner().scan()
 
 
 def _scan_unchanged(previous, record):
@@ -1212,11 +1271,12 @@ def _scan_unchanged(previous, record):
 
 
 def cmd_watch(_argv=None):
+    scanner = Scanner()
     while True:
         if not toggle_on():
             return 0
         try:
-            cmd_scan()
+            scanner.scan()
             cmd_gc()
         except Exception:
             if os.environ.get("DASHBOTS_DEBUG"):

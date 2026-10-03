@@ -825,6 +825,111 @@ class DashbotsTest(unittest.TestCase):
         self.assertIsNone(self.record(f"scan-agy-{pid}"))
         self.assertEqual(self.record(f"agy-{pid}")["status"], "working")
 
+    def test_harness_of_skips_cmdline_for_other_comms(self):
+        originals = (self.mod.comm_of, self.mod.cmdline)
+        opened = []
+        comms = {1: "bash", 2: "node", 3: "codex"}
+        self.mod.comm_of = lambda pid: comms[pid]
+
+        def fake_cmdline(pid):
+            opened.append(pid)
+            return {2: ["/usr/bin/node", "/opt/gemini.js"], 3: ["/usr/bin/codex"]}.get(pid, [])
+
+        self.mod.cmdline = fake_cmdline
+        try:
+            self.assertIsNone(self.mod.harness_of(1))
+            self.assertEqual(self.mod.harness_of(2), "gemini")
+            self.assertEqual(self.mod.harness_of(3), "codex")
+            self.assertEqual(opened, [2, 3])
+        finally:
+            self.mod.comm_of, self.mod.cmdline = originals
+
+    def test_scanner_classifies_a_pid_once_until_the_recheck(self):
+        names = ("iter_pids", "harness_of", "pid_alive", "cwd_of", "hypr_clients")
+        originals = {name: getattr(self.mod, name) for name in names}
+        pids = [101, 202]
+        looked = []
+        hypr = []
+        clock = [1000.0]
+
+        def harness_of(pid):
+            looked.append(pid)
+            return "codex" if pid == 202 else None
+
+        def clients():
+            hypr.append(1)
+            return [{"pid": 202, "address": "0xabc"}]
+
+        self.mod.iter_pids = lambda: list(pids)
+        self.mod.harness_of = harness_of
+        self.mod.pid_alive = lambda pid: True
+        self.mod.cwd_of = lambda pid: "/work/demo"
+        self.mod.hypr_clients = clients
+        try:
+            scanner = self.mod.Scanner(clock=lambda: clock[0])
+            scanner.scan()
+            self.assertEqual(sorted(looked), [101, 202])
+            self.assertEqual(len(hypr), 1)
+            self.assertEqual(self.record("scan-codex-202")["window"], "0xabc")
+
+            looked.clear()
+            clock[0] += 2
+            pids.append(303)
+            scanner.scan()
+            self.assertEqual(looked, [303])
+            self.assertEqual(len(hypr), 1)
+
+            pids.remove(101)
+            clock[0] += 2
+            scanner.scan()
+            self.assertNotIn(101, scanner.harnesses)
+
+            looked.clear()
+            clock[0] += self.mod.RECHECK_SECONDS
+            scanner.scan()
+            self.assertEqual(sorted(looked), [202, 303])
+            self.assertEqual(len(hypr), 2)
+        finally:
+            for name, value in originals.items():
+                setattr(self.mod, name, value)
+
+    def test_scanner_skips_hyprctl_without_a_candidate(self):
+        names = ("iter_pids", "harness_of", "hypr_clients")
+        originals = {name: getattr(self.mod, name) for name in names}
+        hypr = []
+        self.mod.iter_pids = lambda: [101, 202]
+        self.mod.harness_of = lambda pid: None
+        self.mod.hypr_clients = lambda: hypr.append(1) or []
+        try:
+            self.assertEqual(self.mod.cmd_scan(["scan"]), 0)
+            self.assertEqual(hypr, [])
+        finally:
+            for name, value in originals.items():
+                setattr(self.mod, name, value)
+
+    def test_scanner_retries_a_missing_window_slowly(self):
+        names = ("iter_pids", "harness_of", "pid_alive", "cwd_of", "hypr_clients")
+        originals = {name: getattr(self.mod, name) for name in names}
+        hypr = []
+        clock = [1000.0]
+        self.mod.iter_pids = lambda: [202]
+        self.mod.harness_of = lambda pid: "codex"
+        self.mod.pid_alive = lambda pid: True
+        self.mod.cwd_of = lambda pid: "/work/demo"
+        self.mod.hypr_clients = lambda: hypr.append(1) or []
+        try:
+            scanner = self.mod.Scanner(clock=lambda: clock[0])
+            scanner.scan()
+            clock[0] += 2
+            scanner.scan()
+            self.assertEqual(len(hypr), 1)
+            clock[0] += self.mod.WINDOW_RETRY_SECONDS
+            scanner.scan()
+            self.assertEqual(len(hypr), 2)
+        finally:
+            for name, value in originals.items():
+                setattr(self.mod, name, value)
+
     def test_agy_hook_merge_keeps_other_hooks(self):
         path = Path(self.tmp.name) / "hooks.json"
         path.write_text(json.dumps({
