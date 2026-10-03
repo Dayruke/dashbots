@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -36,6 +37,8 @@ class DashbotsTest(unittest.TestCase):
         os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
         os.environ.pop("GEMINI_SESSION_ID", None)
         os.environ.pop("DASHBOTS_AGY_HOOKS_FILE", None)
+        os.environ.pop("DASHBOTS_CONFIG", None)
+        os.environ.pop("DASHBOTS_SHELL_FILE", None)
         self._now_stamp = self.mod.now_stamp
         self._hypr_clients = self.mod.hypr_clients
         self.mod.hypr_clients = lambda: []
@@ -286,51 +289,137 @@ class DashbotsTest(unittest.TestCase):
         self.assertIsNotNone(self.record("s1"))
 
     def test_list_filters_dead_and_sorts(self):
+        real_alive = self.mod.pid_alive
+        self.mod.pid_alive = lambda pid: int(pid) in (11, 22)
+        try:
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:01Z"
+            self.mod.write_record({
+                "id": "older",
+                "harness": "grok",
+                "pid": 11,
+                "cwd": "/work/a",
+                "title": "a",
+                "status": "alive",
+                "window": "",
+                "updated_at": "",
+                "activity": "",
+                "source": "hook",
+                "turn": "",
+            })
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:02Z"
+            self.mod.write_record({
+                "id": "newer",
+                "harness": "grok",
+                "pid": 22,
+                "cwd": "/work/b",
+                "title": "b",
+                "status": "alive",
+                "window": "",
+                "updated_at": "",
+                "activity": "",
+                "source": "hook",
+                "turn": "",
+            })
+            self.mod.write_record({
+                "id": "dead",
+                "harness": "codex",
+                "pid": 2 ** 30,
+                "cwd": "/work/c",
+                "title": "c",
+                "status": "alive",
+                "window": "",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "activity": "",
+                "source": "scan",
+                "turn": "",
+            })
+            listed = self.mod.live_records()
+            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+        finally:
+            self.mod.pid_alive = real_alive
+
+    def test_new_session_replaces_the_previous_mark_on_that_pid(self):
         self.mod.now_stamp = lambda: "2026-01-01T00:00:01Z"
-        self.hook({"hook_event_name": "SessionStart", "sessionId": "older", "cwd": "/work/a"})
+        self.hook({"hook_event_name": "SessionStart", "sessionId": "old", "cwd": "/work/demo"})
+        self.hook({
+            "hook_event_name": "Notification",
+            "sessionId": "old",
+            "notification_type": "idle_prompt",
+        })
+        self.hook({
+            "hook_event_name": "PreToolUse",
+            "sessionId": "new",
+            "toolName": "grep",
+        })
+        self.assertIsNone(self.record("new"))
+        self.assertEqual(self.record("old")["status"], "waiting")
+
         self.mod.now_stamp = lambda: "2026-01-01T00:00:02Z"
-        self.hook({"hook_event_name": "SessionStart", "sessionId": "newer", "cwd": "/work/b"})
+        self.hook({"hook_event_name": "SessionStart", "sessionId": "new", "cwd": "/work/demo"})
+        self.assertIsNone(self.record("old"))
+        self.assertEqual(self.record("new")["pid"], os.getpid())
+
+        self.mod.now_stamp = lambda: "2026-01-01T00:00:03Z"
+        self.hook({
+            "hook_event_name": "Notification",
+            "sessionId": "old",
+            "notification_type": "idle_prompt",
+        })
+        self.assertIsNone(self.record("old"))
+        self.assertIsNotNone(self.record("new"))
+
+        self.mod.now_stamp = lambda: "2026-01-01T00:00:01Z"
         self.mod.write_record({
-            "id": "dead",
-            "harness": "codex",
-            "pid": 2 ** 30,
-            "cwd": "/work/c",
-            "title": "c",
-            "status": "alive",
+            "id": "old",
+            "harness": "grok",
+            "pid": os.getpid(),
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "waiting",
             "window": "",
-            "updated_at": "2026-01-02T00:00:00Z",
-            "activity": "",
-            "source": "scan",
+            "updated_at": "",
+            "activity": "idle",
+            "source": "hook",
             "turn": "",
         })
-        listed = self.mod.live_records()
-        self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+        self.assertEqual(self.mod.cmd_gc(["gc"]), 0)
+        self.assertIsNone(self.record("old"))
+        self.assertIsNotNone(self.record("new"))
 
     def test_body_is_unique_until_the_catalog_is_full(self):
         self.mod.random.seed(0)
-        for index in range(4):
+        real_alive = self.mod.pid_alive
+        self.mod.pid_alive = lambda pid: int(pid) >= 1000
+        try:
+            for index in range(4):
+                os.environ["DASHBOTS_HOOK_PID"] = str(1000 + index)
+                self.hook({
+                    "hook_event_name": "SessionStart",
+                    "sessionId": f"s{index}",
+                    "cwd": "/work/demo",
+                })
+            bodies = [self.record(f"s{index}")["body"] for index in range(4)]
+            self.assertEqual(sorted(bodies), ["blob", "circle", "square", "triangle"])
+            kept = self.record("s0")["body"]
+            os.environ["DASHBOTS_HOOK_PID"] = "1000"
             self.hook({
-                "hook_event_name": "SessionStart",
-                "sessionId": f"s{index}",
+                "hook_event_name": "UserPromptSubmit",
+                "sessionId": "s0",
+                "promptId": "p1",
+                "prompt": "keep the shape",
                 "cwd": "/work/demo",
             })
-        bodies = [self.record(f"s{index}")["body"] for index in range(4)]
-        self.assertEqual(sorted(bodies), ["blob", "circle", "square", "triangle"])
-        kept = self.record("s0")["body"]
-        self.hook({
-            "hook_event_name": "UserPromptSubmit",
-            "sessionId": "s0",
-            "promptId": "p1",
-            "prompt": "keep the shape",
-            "cwd": "/work/demo",
-        })
-        self.assertEqual(self.record("s0")["body"], kept)
-        self.hook({
-            "hook_event_name": "SessionStart",
-            "sessionId": "s4",
-            "cwd": "/work/demo",
-        })
-        self.assertIn(self.record("s4")["body"], bodies)
+            self.assertEqual(self.record("s0")["body"], kept)
+            os.environ["DASHBOTS_HOOK_PID"] = "1004"
+            self.hook({
+                "hook_event_name": "SessionStart",
+                "sessionId": "s4",
+                "cwd": "/work/demo",
+            })
+            self.assertIn(self.record("s4")["body"], bodies)
+        finally:
+            self.mod.pid_alive = real_alive
+            os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
 
     def test_unsafe_id_is_dropped(self):
         self.hook({"hook_event_name": "SessionStart", "sessionId": "../etc/passwd", "cwd": "/work/demo"})
@@ -535,6 +624,38 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(quiet.returncode, 0)
         self.assertEqual(quiet.stdout, "{}\n")
         self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "needs a decision")
+
+    def test_hook_applies_while_stdin_stays_open(self):
+        script = Path(__file__).resolve().parents[1] / "bin" / "dashbots"
+        env = os.environ.copy()
+        env["DASHBOTS_HOOK_ASSUME"] = "1"
+        env["DASHBOTS_HOOK_PID"] = str(os.getpid())
+        proc = subprocess.Popen(
+            [str(script), "hook", "--harness", "agy", "--event", "Stop"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        proc.stdin.write(json.dumps({
+            "terminationReason": "model_stop",
+            "fullyIdle": True,
+            "workspacePaths": ["/work/demo"],
+        }))
+        proc.stdin.flush()
+        status = None
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            rec = self.record(f"agy-{os.getpid()}")
+            if rec and rec.get("status") == "waiting":
+                status = rec["status"]
+                break
+            time.sleep(0.05)
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.wait(timeout=2)
+        self.assertEqual(status, "waiting")
+        self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "idle")
 
     def test_agy_presence_does_not_clobber_status(self):
         pid = os.getpid()
@@ -748,6 +869,87 @@ class DashbotsTest(unittest.TestCase):
         self.menu.write_text(broken, encoding="utf-8")
         self.assertFalse(self.mod.install_menu_trigger())
         self.assertEqual(self.menu.read_text(encoding="utf-8"), broken)
+
+    def test_parse_config(self):
+        parsed = self.mod.parse_config(
+            "# note\nswingMs 800\nanimate false\nplace workspaces\nplace sideways\n"
+        )
+        self.assertEqual(parsed["swingMs"], 800)
+        self.assertFalse(parsed["animate"])
+        self.assertEqual(parsed["place"], "workspaces")
+        defaults = self.mod.parse_config("swingMs 0\nanimate maybe\n")
+        self.assertEqual(defaults["swingMs"], 2000)
+        self.assertTrue(defaults["animate"])
+        self.assertEqual(defaults["place"], "center-right")
+
+    def test_install_config_keeps_an_existing_file(self):
+        path = Path(self.tmp.name) / "config"
+        os.environ["DASHBOTS_CONFIG"] = str(path)
+        self.mod.install_config()
+        self.assertEqual(path.read_text(encoding="utf-8"), self.mod.default_config_text())
+        path.write_text("swingMs 50\n", encoding="utf-8")
+        self.mod.install_config()
+        self.assertEqual(path.read_text(encoding="utf-8"), "swingMs 50\n")
+
+    def test_place_follows_config(self):
+        shell = Path(self.tmp.name) / "shell.json"
+        shell.write_text(json.dumps({
+            "bar": {"layout": {
+                "left": [{"id": "omarchy.menu"}, {"id": "omarchy.workspaces"}],
+                "center": [
+                    {"id": "omarchy.keyboard-layout"},
+                    {"id": "omarchy.clock", "format": "HH:mm"},
+                    {"id": "omarchy.weather"},
+                    {"id": "dashbots"},
+                ],
+                "right": [{"id": "omarchy.tray"}],
+            }},
+        }), encoding="utf-8")
+        os.environ["DASHBOTS_SHELL_FILE"] = str(shell)
+        config = Path(self.tmp.name) / "config"
+        os.environ["DASHBOTS_CONFIG"] = str(config)
+        config.write_text("place center-left\n", encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        data = json.loads(shell.read_text(encoding="utf-8"))
+        center = data["bar"]["layout"]["center"]
+        self.assertEqual(
+            [entry["id"] for entry in center],
+            ["omarchy.keyboard-layout", "dashbots", "omarchy.clock", "omarchy.weather"],
+        )
+        self.assertEqual(center[2]["format"], "HH:mm")
+
+        config.write_text("place center-right\n", encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        data = json.loads(shell.read_text(encoding="utf-8"))
+        center = data["bar"]["layout"]["center"]
+        self.assertEqual(
+            [entry["id"] for entry in center],
+            ["omarchy.keyboard-layout", "omarchy.clock", "omarchy.weather", "dashbots"],
+        )
+        parked = shell.read_text(encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        self.assertEqual(shell.read_text(encoding="utf-8"), parked)
+
+        config.write_text("place workspaces\n", encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        data = json.loads(shell.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [entry["id"] for entry in data["bar"]["layout"]["left"]],
+            ["omarchy.menu", "dashbots", "omarchy.workspaces"],
+        )
+        self.assertNotIn("dashbots", [entry["id"] for entry in data["bar"]["layout"]["center"]])
+
+        bare = {"bar": {"layout": {"left": [], "center": [{"id": "omarchy.indicators"}], "right": []}}}
+        self.mod.move_slot(bare["bar"]["layout"], "center-left")
+        self.assertEqual(
+            [entry["id"] for entry in bare["bar"]["layout"]["center"]],
+            ["dashbots", "omarchy.indicators"],
+        )
+        self.mod.move_slot(bare["bar"]["layout"], "center-right")
+        self.assertEqual(
+            [entry["id"] for entry in bare["bar"]["layout"]["center"]],
+            ["omarchy.indicators", "dashbots"],
+        )
 
 
 if __name__ == "__main__":

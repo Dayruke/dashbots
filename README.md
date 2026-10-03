@@ -16,7 +16,7 @@ From a checkout:
 ./bin/dashbots install
 ```
 
-Install links `~/.local/bin/dashbots` to this script and refuses to overwrite a file that is already there. It writes the hook adapters, merges them into the harness hook files, copies the plugin into `~/.config/omarchy/plugins/dashbots/`, validates it, and places the bar slot to the right of weather if the slot is not already in the layout. If weather is not on the bar, the slot goes on the left, after the workspace switcher. A later install does not move a slot you have dragged. It enables the user systemd path unit `dashbots.path`, which starts `dashbots.service` while the flag exists. It also adds a Dashbots row to the Omarchy menu under Trigger, then Toggle.
+Install links `~/.local/bin/dashbots` to this script and refuses to overwrite a file that is already there. It writes the hook adapters, merges them into the harness hook files, copies the plugin into `~/.config/omarchy/plugins/dashbots/`, and validates it. The bar config is `~/.config/dashbots/config`. Install creates that file only when it is missing. `place` in that file puts the slot just to the right of the weather (`center-right`, the default), just to the left of the clock and weather (`center-left`), or just to the left of the workspace listing (`workspaces`). Saving the file applies it. It enables the user systemd path unit `dashbots.path`, which starts `dashbots.service` while the flag exists. It also adds a Dashbots row to the Omarchy menu under Trigger, then Toggle.
 
 Hooks load when a session starts. A session that is already open, including the one that ran install, will not report until it is restarted. Once the Grok, Claude, and Gemini adapters are installed, the process scan will not draw those harnesses. Antigravity keeps a still mark until that process is restarted and a hook fires. Restart the session you want on the bar.
 
@@ -46,7 +46,7 @@ The bar widget watches the sessions directory and the toggle flag. A record is r
 
 ## What you see
 
-The slot sits in the center of the bar, immediately to the right of the weather widget. While Dashbots is on, the slot is always there: one body per live session, or a single `_` when none are alive. Bodies, eyes, and tints are in the icon reference below.
+Where the slot sits is `place` in `~/.config/dashbots/config`. `center-right` is just to the right of the weather. `center-left` is just to the left of the clock and weather. `workspaces` is just to the left of the workspace listing. While Dashbots is on, the slot is always there: one body per live session, or a single `_` when none are alive. Bodies, eyes, and tints are in the icon reference below. `swingMs` is one full swing in milliseconds. `animate false` keeps a working icon still.
 
 Hover shows the harness, the session name (the directory it started in), and the current activity. A prompt's activity is the first line of that prompt. A tool's activity is the tool name. A permission prompt says `needs a decision`.
 
@@ -69,12 +69,12 @@ A new session gets one of the four bodies at random: circle, blob, triangle, or 
 | Tint | When |
 | --- | --- |
 | Foreground, still | Alive. Present, and the activity is unknown. |
-| Accent, breathing | Working. The body grows and shrinks. |
+| Accent, swinging | Working. The body leans side to side and bobs. |
 | Muted, still | Asleep. This turn ended. |
 | Accent, still | Needs a decision. The dots stay open. |
 | Urgent, still | The turn failed. The dots stay open. |
 
-Foreground is the same ink as the clock. Accent is the theme highlight. Muted is the dim theme color. Urgent is the theme's alert color. A light theme uses those same roles. Working and a decision share the accent color. Working is the one that moves.
+Foreground is the same ink as the clock. Accent is the theme highlight. Muted is the dim theme color. Urgent is the theme's alert color. A light theme uses those same roles. Working and a decision share the accent color. Working is the one that moves, unless `animate` is false.
 
 ## Not (yet) implemented
 

@@ -1,0 +1,15 @@
+# Dashbots bar. This file is ~/.config/dashbots/config
+#
+# swingMs is one full swing, right then left, in milliseconds. Lower is faster.
+# animate is true or false. false keeps a working icon still.
+# place is center-right, center-left, or workspaces.
+#   center-right: just to the right of the weather.
+#   center-left: just to the left of the clock and weather.
+#   workspaces: just to the left of the workspace listing.
+#
+# Saving this file applies the values. The bar layout reloads on its own.
+# If a change does not show, run: omarchy restart shell
+
+swingMs 2000
+animate true
+place center-right

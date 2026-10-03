@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -132,7 +133,95 @@ def plugin_dir():
 
 
 def shell_json_path():
+    override = os.environ.get("DASHBOTS_SHELL_FILE")
+    if override:
+        return override
     return os.path.join(home(), ".config", "omarchy", "shell.json")
+
+
+def config_path():
+    override = os.environ.get("DASHBOTS_CONFIG")
+    if override:
+        return override
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
+    return os.path.join(base, "dashbots", "config")
+
+
+# center-left is just left of the clock and weather.
+# center-right is just right of the weather. That is the default.
+# workspaces is just left of the workspace listing.
+# Each value is section, anchors in preference order, and which side of the anchor.
+PLACES = {
+    "center-left": ("center", ("omarchy.clock", "omarchy.weather"), "before"),
+    "center-right": ("center", ("omarchy.weather", "omarchy.clock"), "after"),
+    "workspaces": ("left", ("omarchy.workspaces",), "before"),
+}
+
+
+def default_config_text():
+    path = os.path.join(repo_root(), "config")
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def parse_config(text):
+    swing = 2000
+    animate = True
+    place = "center-right"
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        key, value = parts[0], parts[1]
+        if key == "swingMs":
+            try:
+                number = int(value)
+            except ValueError:
+                continue
+            if number > 0:
+                swing = number
+        elif key == "animate":
+            word = value.lower()
+            if word in ("true", "yes", "1", "on"):
+                animate = True
+            elif word in ("false", "no", "0", "off"):
+                animate = False
+        elif key == "place" and value in PLACES:
+            place = value
+    return {"swingMs": swing, "animate": animate, "place": place}
+
+
+def read_config():
+    path = config_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return parse_config(handle.read())
+    except OSError:
+        return parse_config("")
+
+
+def install_config():
+    path = config_path()
+    if os.path.exists(path):
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent or ".", prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(default_config_text())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 MENU_ID = "trigger.toggle.dashbots"
@@ -576,6 +665,78 @@ def delete_scan_twin(pid):
                 pass
 
 
+def other_hook_sessions(harness, pid, session_id):
+    """Hook marks for this process other than session_id."""
+    harness = sanitize_harness(harness)
+    keep = sanitize_id(session_id)
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return []
+    found = []
+    for record in iter_records():
+        if record.get("source") != "hook":
+            continue
+        if sanitize_harness(record.get("harness")) != harness:
+            continue
+        try:
+            if int(record.get("pid")) != pid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        other = sanitize_id(record.get("id"))
+        if other and other != keep:
+            found.append(record)
+    return found
+
+
+def claim_session(harness, pid, session_id, name):
+    """One hook mark per process.
+
+    A new conversation in the same process replaces the previous mark.
+    A late event from the conversation that was replaced must not paint
+    a second icon on that window.
+    """
+    siblings = other_hook_sessions(harness, pid, session_id)
+    current = read_record(session_path(session_id))
+    owning = name == "SessionStart" or name in NEW_TURN_EVENTS
+    if current is None and siblings and not owning:
+        return False
+    if current is not None and siblings and not owning:
+        newest = max(str(item.get("updated_at") or "") for item in siblings)
+        if newest > str(current.get("updated_at") or ""):
+            delete_record(session_id)
+            return False
+    for record in siblings:
+        delete_record(record.get("id"))
+    return True
+
+
+def stale_same_pid_ids(records):
+    """Older hook marks that share a live process with a newer conversation."""
+    groups = {}
+    for record in records:
+        if record.get("source") != "hook":
+            continue
+        harness = sanitize_harness(record.get("harness"))
+        session_id = sanitize_id(record.get("id"))
+        try:
+            pid = int(record.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if not harness or not session_id:
+            continue
+        groups.setdefault((harness, pid), []).append(record)
+    stale = []
+    for grouped in groups.values():
+        if len(grouped) < 2:
+            continue
+        grouped.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))
+        for record in grouped[:-1]:
+            stale.append(sanitize_id(record.get("id")))
+    return stale
+
+
 def agy_cwd(payload):
     paths = payload.get("workspacePaths")
     if isinstance(paths, list):
@@ -748,6 +909,8 @@ def apply_hook(payload, harness):
 
     if record.get("status") not in STATUSES:
         return 0
+    if not claim_session(harness, pid, session_id, name):
+        return 0
     delete_scan_twin(pid)
     write_record(record)
     return 0
@@ -896,6 +1059,7 @@ def cmd_gc(_argv=None):
     if not os.path.isdir(directory):
         return 0
     records = list(iter_records())
+    stale_ids = set(stale_same_pid_ids(records))
     hooked = set()
     for record in records:
         if record.get("source") != "hook":
@@ -909,7 +1073,7 @@ def cmd_gc(_argv=None):
         session_id = sanitize_id(record.get("id"))
         if not session_id:
             continue
-        drop = not pid_alive(record.get("pid"))
+        drop = not pid_alive(record.get("pid")) or session_id in stale_ids
         if record.get("source") == "scan" and has_marker(record.get("harness")):
             harness = sanitize_harness(record.get("harness"))
             try:
@@ -1092,11 +1256,52 @@ def cmd_report(argv):
     return 0
 
 
+def read_hook_input(wait=2.0):
+    """One JSON value from stdin. Do not wait for the pipe to close.
+
+    A hook that reads until EOF sits there when the harness keeps stdin
+    open, and a cancelled Antigravity turn then kills it. The mark stays
+    "working" because Stop never lands. A complete value is enough.
+    """
+    try:
+        fd = sys.stdin.fileno()
+    except ValueError:
+        return ""
+    chunks = []
+    decoder = json.JSONDecoder()
+    deadline = time.monotonic() + wait
+    while True:
+        if chunks:
+            text = b"".join(chunks).decode("utf-8", "replace").lstrip()
+            try:
+                _obj, end = decoder.raw_decode(text)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return text[:end]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return b"".join(chunks).decode("utf-8", "replace")
+        try:
+            ready, _, _ = select.select([fd], [], [], min(0.05, remaining))
+        except (ValueError, OSError):
+            return b"".join(chunks).decode("utf-8", "replace")
+        if not ready:
+            continue
+        try:
+            piece = os.read(fd, 65536)
+        except OSError:
+            return b"".join(chunks).decode("utf-8", "replace")
+        if not piece:
+            return b"".join(chunks).decode("utf-8", "replace")
+        chunks.append(piece)
+
+
 def cmd_hook(argv):
     try:
         harness = flag_value(argv, "--harness") or ""
         event = flag_value(argv, "--event") or ""
-        raw = sys.stdin.read()
+        raw = read_hook_input()
         if not raw.strip():
             return 0
         payload = json.loads(raw)
@@ -1195,14 +1400,41 @@ def install_wrapper(harness, gemini=False, agy=False):
     if agy:
         # PreToolUse stdout is a permission decision. {} takes no decision.
         # Stop must not print "continue", or the turn would not end.
-        lines.append("event=$1")
-        lines.append('"$bin" hook --harness agy --event "$event"')
-        lines.append('if [ "$event" = "Stop" ]; then')
-        lines.append("  printf '%s\\n' '{\"decision\":\"allow\"}'")
-        lines.append("else")
-        lines.append("  printf '%s\\n' '{}'")
-        lines.append("fi")
-        lines.append("exit 0")
+        # A cancelled turn kills this process. Stop is detached so the
+        # mark can leave "working" after that kill. The pid is captured
+        # first: the detached process is reparented and cannot walk back
+        # to agy itself.
+        lines.extend([
+            "event=$1",
+            "agy_pid() {",
+            "  pid=$PPID",
+            "  n=0",
+            '  while [ "$n" -lt 40 ] && [ "$pid" -gt 1 ]; do',
+            '    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1',
+            '    if [ "$comm" = "agy" ]; then',
+            "      printf '%s\\n' \"$pid\"",
+            "      return 0",
+            "    fi",
+            "    pid=$(awk '/^PPid:/ { print $2 }' \"/proc/$pid/status\" 2>/dev/null) || return 1",
+            "    n=$((n + 1))",
+            "  done",
+            "  return 1",
+            "}",
+            'if [ "$event" = "Stop" ]; then',
+            '  pid=$(agy_pid) || pid=""',
+            '  if [ -n "$pid" ] && command -v setsid >/dev/null 2>&1; then',
+            '    DASHBOTS_HOOK_ASSUME=1 DASHBOTS_HOOK_PID=$pid \\',
+            '      setsid -f "$bin" hook --harness agy --event "$event" >/dev/null 2>&1',
+            "  else",
+            '    "$bin" hook --harness agy --event "$event"',
+            "  fi",
+            "  printf '%s\\n' '{\"decision\":\"allow\"}'",
+            "  exit 0",
+            "fi",
+            '"$bin" hook --harness agy --event "$event"',
+            "printf '%s\\n' '{}'",
+            "exit 0",
+        ])
     elif gemini:
         lines.append(f'"$bin" hook --harness {harness}')
         lines.append("printf '%s\\n' '{}'")
@@ -1428,50 +1660,119 @@ def bar_has_dashbots(config=None):
     return False
 
 
-def insert_after(entries, anchor):
-    for index, entry in enumerate(entries):
-        if isinstance(entry, dict) and entry.get("id") == anchor:
-            entries.insert(index + 1, {"id": "dashbots"})
-            return True
-    return False
-
-
-def insert_shell_entry():
-    path = shell_json_path()
-    config = load_json_object(path)
-    if config is None:
-        raise SystemExit(f"{path} is not strict JSON; bar slot was not inserted")
-    if bar_has_dashbots(config):
-        return
+def bar_layout(config):
     bar = config.setdefault("bar", {})
     layout = bar.setdefault("layout", {})
-    center = layout.get("center")
-    if not isinstance(center, list):
-        center = []
-        layout["center"] = center
-    # Right of weather. The shell pins the tray to the inner edge of the
-    # right section, so "before the tray" cannot sit between center and tray.
-    # If weather is missing, sit on the left, after the workspace switcher.
-    if not insert_after(center, "omarchy.weather"):
-        left = layout.get("left")
-        if not isinstance(left, list):
-            left = []
-            layout["left"] = left
-        if not insert_after(left, "omarchy.workspaces"):
-            left.append({"id": "dashbots"})
-    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    shutil.copy(path, f"{path}.bak.{stamp}")
+    for section in ("left", "center", "right"):
+        entries = layout.get(section)
+        if not isinstance(entries, list):
+            layout[section] = []
+    return layout
+
+
+def anchor_index(entries, anchors):
+    for anchor in anchors:
+        for index, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("id") == anchor:
+                return index
+    return None
+
+
+def place_spec(place):
+    if place not in PLACES:
+        place = "center-right"
+    return PLACES[place]
+
+
+def chosen_anchor(entries, anchors):
+    for name in anchors:
+        if anchor_index(entries, (name,)) is not None:
+            return name
+    return None
+
+
+def placed_correctly(layout, place):
+    section, anchors, side = place_spec(place)
+    found = []
+    for name in ("left", "center", "right"):
+        entries = layout.get(name) or []
+        for index, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("id") == "dashbots":
+                found.append((name, index))
+    if len(found) != 1 or found[0][0] != section:
+        return False
+    entries = layout.get(section) or []
+    index = found[0][1]
+    anchor = anchor_index(entries, (chosen_anchor(entries, anchors),)) if chosen_anchor(entries, anchors) else None
+    if anchor is None:
+        if side == "after":
+            return index == len(entries) - 1
+        return index == 0
+    if side == "after":
+        return index == anchor + 1
+    return index + 1 == anchor
+
+
+def move_slot(layout, place):
+    """Put the slot where `place` says. Return whether the layout changed."""
+    section, anchors, side = place_spec(place)
+    if placed_correctly(layout, place if place in PLACES else "center-right"):
+        return False
+    for name in ("left", "center", "right"):
+        entries = layout.get(name) or []
+        layout[name] = [
+            entry for entry in entries
+            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+        ]
+    entries = layout[section]
+    anchor_name = chosen_anchor(entries, anchors)
+    anchor = anchor_index(entries, (anchor_name,)) if anchor_name else None
+    slot = {"id": "dashbots"}
+    if anchor is None:
+        if side == "after":
+            entries.append(slot)
+        else:
+            entries.insert(0, slot)
+    elif side == "after":
+        entries.insert(anchor + 1, slot)
+    else:
+        entries.insert(anchor, slot)
+    return True
+
+
+def enable_command(layout, place):
+    section, anchors, side = place_spec(place)
+    entries = layout.get(section) or []
+    chosen = chosen_anchor(entries, anchors)
+    command = ["omarchy", "plugin", "enable", "dashbots", "--section", section]
+    if chosen and side == "after":
+        command.extend(["--after", chosen])
+    elif chosen:
+        command.extend(["--before", chosen])
+    else:
+        index = sum(
+            1 for entry in entries
+            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+        )
+        if side == "before":
+            index = 0
+        command.extend(["--index", str(index)])
+    return command
+
+
+def write_placed(config, place):
+    path = shell_json_path()
+    layout = bar_layout(config)
+    if not move_slot(layout, place):
+        return 0
+    if os.path.exists(path):
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        shutil.copy(path, f"{path}.bak.{stamp}")
     write_json(path, config)
+    return 0
 
 
-def enable_bar_slot():
-    if bar_has_dashbots():
-        print("Bar slot already present; left it where it is.")
-        return
-    if not shell_up():
-        insert_shell_entry()
-        print("Shell is down. Inserted the bar slot into shell.json.")
-        return
+def enable_placed(layout, place):
     try:
         subprocess.run(
             ["omarchy-shell", "shell", "rescanPlugins"],
@@ -1482,37 +1783,51 @@ def enable_bar_slot():
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         debug(exc)
-    known = False
-    for _ in range(20):
-        if plugin_known():
-            known = True
-            break
-        time.sleep(0.25)
-    if not known:
-        insert_shell_entry()
-        print("Plugin was not known after rescan. Inserted the bar slot and did not enable.")
-        return
     result = subprocess.run(
-        ["omarchy", "plugin", "enable", "dashbots", "--section", "center", "--after", "omarchy.weather"],
+        enable_command(layout, place),
         capture_output=True,
         text=True,
         timeout=20,
         check=False,
     )
     if result.returncode != 0:
-        result = subprocess.run(
-            ["omarchy", "plugin", "enable", "dashbots", "--section", "left", "--after", "omarchy.workspaces"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-    if result.returncode != 0:
         sys.stderr.write(result.stderr or result.stdout or "enable failed\n")
-        raise SystemExit(result.returncode)
+        return result.returncode or 1
     text = (result.stdout or "").strip()
     if text:
         print(text)
+    return 0
+
+
+def apply_place():
+    place = read_config()["place"]
+    path = shell_json_path()
+    config = load_json_object(path)
+    if not isinstance(config, dict):
+        print(f"{path} is not strict JSON; bar slot was not moved", file=sys.stderr)
+        return 1
+    layout = bar_layout(config)
+    if placed_correctly(layout, place):
+        return 0
+    # A test shell file, or a shell that is not running, is edited directly.
+    if os.environ.get("DASHBOTS_SHELL_FILE") or not shell_up():
+        code = write_placed(config, place)
+        if not os.environ.get("DASHBOTS_SHELL_FILE") and not shell_up():
+            print("Shell is down. Moved the bar slot in shell.json.")
+        return code
+    if enable_placed(layout, place) == 0:
+        return 0
+    return write_placed(config, place)
+
+
+def enable_bar_slot():
+    code = apply_place()
+    if code:
+        raise SystemExit(code)
+
+
+def cmd_place(_argv=None):
+    return apply_place()
 
 
 def install_units():
@@ -1750,6 +2065,7 @@ def cmd_install(_argv=None):
         5000,
     )
     copy_plugin()
+    install_config()
     validate = subprocess.run(
         ["omarchy", "plugin", "validate", plugin_dir()],
         capture_output=True,
@@ -1952,12 +2268,17 @@ def cmd_status(_argv=None):
     row = isinstance(menu, dict) and menu.get(MENU_ID) == MENU_ENTRY
     print(f"menu: {'Trigger, Toggle, Dashbots' if row else 'absent'}")
     print(f"live: {len(live_records())}")
+    settings = read_config()
+    print(f"config: {config_path()}")
+    print(f"swingMs: {settings['swingMs']}")
+    print(f"animate: {'true' if settings['animate'] else 'false'}")
+    print(f"place: {settings['place']}")
     return 0
 
 
 def usage():
     print(
-        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|focus|install|uninstall|status>",
+        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|focus|place|install|uninstall|status>",
         file=sys.stderr,
     )
 
@@ -1978,6 +2299,7 @@ def main(argv=None):
         "scan": cmd_scan,
         "list": cmd_list,
         "focus": cmd_focus,
+        "place": cmd_place,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "status": cmd_status,

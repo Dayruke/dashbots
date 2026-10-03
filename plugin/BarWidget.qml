@@ -10,21 +10,42 @@ import qs.Ui
 //
 // Bodies are single-color SVGs. Eyes are cut out of the shape, so the theme
 // color is the body and the bar shows through the eyes. Working is the accent
-// color and the body breathes. A finished turn is muted, with dashes.
+// color and the body leans. A finished turn is muted, with dashes.
 BarWidget {
   id: root
+
+  // From ~/.config/dashbots/config. swingMs is one full cycle.
+  // Lower is faster. animate false keeps a working icon still.
+  property int swingMs: 2000
+  property bool animate: true
+  property string place: "center-right"
+  property string appliedPlace: ""
+  property bool placeQueued: false
 
   property bool toggleOn: false
   property bool listQueued: false
   property bool flagQueued: false
   property string listText: ""
   property var sessions: []
-  property real breath: 1
+  // Degrees. Positive leans right. 0 is upright.
+  property real lean: 0
+  // Pixels. Negative is above the slot center.
+  property real bob: 0
+  // 0..1 across one full cycle. The pose is derived from this.
+  property real phase: 0
+  // Smaller only while working, so a 30° lean still fits the slot.
+  readonly property real workingScale: 0.85
 
   readonly property string home: Quickshell.env("HOME")
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
   readonly property string sessionsDir: home + "/.local/state/dashbots/sessions"
   readonly property string binPath: home + "/.local/bin/dashbots"
+  readonly property string configPath: {
+    var base = Quickshell.env("XDG_CONFIG_HOME")
+    if (!base) base = root.home + "/.config"
+    return base + "/dashbots/config"
+  }
+  readonly property bool swingOn: root.animate && root.anyWorking
   // Blocks until a session file is added, replaced, or removed. Records are
   // renamed into place, so a status write is a new directory entry. Stdbuf
   // keeps each name on its own line when stdout is a pipe.
@@ -181,7 +202,80 @@ BarWidget {
     listProc.running = true
   }
 
-  onAnyWorkingChanged: if (!anyWorking) root.breath = 1
+  // OutSine on the way down, InSine on the way back up. Upright is the
+  // high, fast point. Either lean is the low point.
+  function poseAt(phase) {
+    var p = phase
+    if (!(p >= 0)) p = 0
+    if (p >= 1) p = 0
+    var seg = Math.floor(p * 4)
+    if (seg < 0) seg = 0
+    if (seg > 3) seg = 3
+    var t = p * 4 - seg
+    var eased = (seg % 2 === 0)
+      ? Math.sin(t * Math.PI / 2)
+      : (1 - Math.cos(t * Math.PI / 2))
+    if (seg === 0) {
+      root.lean = 30 * eased
+      root.bob = -3 + 6 * eased
+    } else if (seg === 1) {
+      root.lean = 30 * (1 - eased)
+      root.bob = 3 - 6 * eased
+    } else if (seg === 2) {
+      root.lean = -30 * eased
+      root.bob = -3 + 6 * eased
+    } else {
+      root.lean = -30 * (1 - eased)
+      root.bob = 3 - 6 * eased
+    }
+  }
+
+  function readConfig(text) {
+    var swing = 2000
+    var motion = true
+    var spot = "center-right"
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (!line || line.charAt(0) === "#") continue
+      var parts = line.split(/\s+/)
+      if (parts.length < 2) continue
+      var key = parts[0]
+      var value = parts[1]
+      if (key === "swingMs") {
+        var n = parseInt(value, 10)
+        if (n > 0) swing = n
+      } else if (key === "animate") {
+        var word = value.toLowerCase()
+        if (word === "true" || word === "yes" || word === "1" || word === "on") motion = true
+        if (word === "false" || word === "no" || word === "0" || word === "off") motion = false
+      } else if (key === "place") {
+        if (value === "center-right" || value === "center-left" || value === "workspaces") spot = value
+      }
+    }
+    root.swingMs = swing
+    root.animate = motion
+    root.place = spot
+    if (spot !== root.appliedPlace) root.runPlace()
+  }
+
+  function runPlace() {
+    root.appliedPlace = root.place
+    if (placeProc.running) {
+      root.placeQueued = true
+      return
+    }
+    root.placeQueued = false
+    placeProc.running = true
+  }
+
+  onPhaseChanged: if (root.swingOn) root.poseAt(root.phase)
+  onSwingOnChanged: if (!root.swingOn) {
+    root.phase = 0
+    root.lean = 0
+    root.bob = 0
+  }
+  onSwingMsChanged: if (swingClock && swingClock.running) swingClock.restart()
 
   onToggleOnChanged: {
     if (!root.toggleOn) {
@@ -212,6 +306,16 @@ BarWidget {
     }
   }
 
+  // Saving the config applies swing speed, animation, and bar position.
+  FileView {
+    id: configFile
+    path: root.configPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.readConfig(text())
+    onFileChanged: reload()
+  }
+
   // Creating or removing this file is the toggle.
   FileView {
     id: flagWatch
@@ -235,27 +339,19 @@ BarWidget {
 
   Component.onCompleted: root.refreshFlag()
 
-  // Size, not a same-color fade. A 16px opacity dip sits next to identical
-  // marks and does not read as motion.
-  SequentialAnimation {
-    running: root.anyWorking
+  // Metronome. Upright is the high point and the fast point. Either lean
+  // is the low point, and the face slows there. One cycle is right, then left.
+  // Duration is swingMs. Nested animations ignore that binding.
+  NumberAnimation {
+    id: swingClock
+    target: root
+    property: "phase"
+    from: 0
+    to: 1
+    duration: Math.max(1, root.swingMs)
+    easing.type: Easing.Linear
     loops: Animation.Infinite
-    NumberAnimation {
-      target: root
-      property: "breath"
-      from: 1
-      to: 0.9
-      duration: 1240
-      easing.type: Easing.InOutSine
-    }
-    NumberAnimation {
-      target: root
-      property: "breath"
-      from: 0.9
-      to: 1
-      duration: 1240
-      easing.type: Easing.InOutSine
-    }
+    running: root.swingOn
   }
 
   Process {
@@ -271,6 +367,16 @@ BarWidget {
   Process {
     id: focusProc
     command: [root.binPath, "focus"]
+  }
+
+  Process {
+    id: placeProc
+    command: [root.binPath, "place"]
+    onExited: function() {
+      if (!root.placeQueued) return
+      root.placeQueued = false
+      Qt.callLater(root.runPlace)
+    }
   }
 
   Process {
@@ -304,6 +410,7 @@ BarWidget {
         required property var modelData
         readonly property bool blank: modelData && modelData.empty === true
         readonly property string sessionStatus: blank ? "" : String(modelData.status || "")
+        readonly property bool moving: sessionStatus === "working" && root.animate
 
         bar: root.bar
         text: blank ? "_" : ""
@@ -332,7 +439,9 @@ BarWidget {
           anchors.centerIn: parent
           width: Style.bar.iconCanvas
           height: Style.bar.iconCanvas
-          scale: button.sessionStatus === "working" ? root.breath : 1
+          scale: button.moving ? root.workingScale : 1
+          rotation: button.moving ? root.lean : 0
+          anchors.verticalCenterOffset: button.moving ? root.bob : 0
           transformOrigin: Item.Center
 
           Image {

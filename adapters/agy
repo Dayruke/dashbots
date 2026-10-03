@@ -1,10 +1,39 @@
 #!/bin/sh
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
 event=$1
-"$root/bin/dashbots" hook --harness agy --event "$event"
+bin=$root/bin/dashbots
+
+# Walk to the agy process before any detach. A detached reporter is
+# reparented and can no longer find that ancestor itself.
+agy_pid() {
+  pid=$PPID
+  n=0
+  while [ "$n" -lt 40 ] && [ "$pid" -gt 1 ]; do
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+    if [ "$comm" = "agy" ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    pid=$(awk '/^PPid:/ { print $2 }' "/proc/$pid/status" 2>/dev/null) || return 1
+    n=$((n + 1))
+  done
+  return 1
+}
+
 if [ "$event" = "Stop" ]; then
+  # A cancelled turn kills this process before a synchronous write lands,
+  # and the mark stays on "thinking". Detach the write, then answer.
+  # Anything other than "continue" lets the turn end.
+  pid=$(agy_pid) || pid=""
+  if [ -n "$pid" ] && command -v setsid >/dev/null 2>&1; then
+    DASHBOTS_HOOK_ASSUME=1 DASHBOTS_HOOK_PID=$pid \
+      setsid -f "$bin" hook --harness agy --event "$event" >/dev/null 2>&1
+  else
+    "$bin" hook --harness agy --event "$event"
+  fi
   printf '%s\n' '{"decision":"allow"}'
-else
-  printf '%s\n' '{}'
+  exit 0
 fi
+"$bin" hook --harness agy --event "$event"
+printf '%s\n' '{}'
 exit 0
