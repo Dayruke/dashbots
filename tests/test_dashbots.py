@@ -39,6 +39,7 @@ class DashbotsTest(unittest.TestCase):
         os.environ.pop("DASHBOTS_AGY_HOOKS_FILE", None)
         os.environ.pop("DASHBOTS_CONFIG", None)
         os.environ.pop("DASHBOTS_SHELL_FILE", None)
+        os.environ.pop("DASHBOTS_ICONS", None)
         self._now_stamp = self.mod.now_stamp
         self._hypr_clients = self.mod.hypr_clients
         self.mod.hypr_clients = lambda: []
@@ -463,20 +464,34 @@ class DashbotsTest(unittest.TestCase):
         self.assertIsNone(self.record("old"))
         self.assertIsNotNone(self.record("new"))
 
+    def _use_icon_set(self, name, ids):
+        root = Path(self.tmp.name) / "icons"
+        folder = root / name
+        folder.mkdir(parents=True)
+        for icon_id in ids:
+            (folder / f"{icon_id}.svg").write_text("<svg></svg>", encoding="utf-8")
+            (folder / f"{icon_id}-asleep.svg").write_text("<svg></svg>", encoding="utf-8")
+        os.environ["DASHBOTS_ICONS"] = str(root)
+        config = Path(self.tmp.name) / "config-icons"
+        config.write_text(f"icons {name}\n", encoding="utf-8")
+        os.environ["DASHBOTS_CONFIG"] = str(config)
+
     def test_body_is_unique_until_the_catalog_is_full(self):
+        self._use_icon_set("tiny", ("ant", "bee", "cat"))
+        self.assertEqual(self.mod.bodies(), ("ant", "bee", "cat"))
         self.mod.random.seed(0)
         real_alive = self.mod.pid_alive
         self.mod.pid_alive = lambda pid: int(pid) >= 1000
         try:
-            for index in range(4):
+            for index in range(3):
                 os.environ["DASHBOTS_HOOK_PID"] = str(1000 + index)
                 self.hook({
                     "hook_event_name": "SessionStart",
                     "sessionId": f"s{index}",
                     "cwd": "/work/demo",
                 })
-            bodies = [self.record(f"s{index}")["body"] for index in range(4)]
-            self.assertEqual(sorted(bodies), ["blob", "circle", "square", "triangle"])
+            bodies = [self.record(f"s{index}")["body"] for index in range(3)]
+            self.assertEqual(sorted(bodies), ["ant", "bee", "cat"])
             kept = self.record("s0")["body"]
             os.environ["DASHBOTS_HOOK_PID"] = "1000"
             self.hook({
@@ -494,9 +509,163 @@ class DashbotsTest(unittest.TestCase):
                 "cwd": "/work/demo",
             })
             self.assertIn(self.record("s4")["body"], bodies)
+            stale = self.record("s0")
+            stale["body"] = "circle"
+            Path(self.mod.session_path("s0")).write_text(json.dumps(stale), encoding="utf-8")
+            self.assertEqual(self.mod.cmd_rebody(["rebody"]), 0)
+            self.assertIn(self.record("s0")["body"], ["ant", "bee", "cat"])
+            self.assertEqual(self.record("s1")["body"], bodies[1])
         finally:
             self.mod.pid_alive = real_alive
             os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
+
+    def test_shipped_icon_sets_and_menu_imp(self):
+        os.environ.pop("DASHBOTS_ICONS", None)
+        root = self.mod.shipped_icons_root()
+        self.assertIn("imp", self.mod.bodies("botvaders", root))
+        self.assertIn("flake", self.mod.bodies("botvaders", root))
+        self.assertNotIn("hut", self.mod.bodies("botvaders", root))
+        self.assertIn("circle", self.mod.bodies("primitives", root))
+        self.assertNotIn("blob", self.mod.bodies("botvaders", root))
+        self.assertNotIn("imp-asleep", self.mod.bodies("botvaders", root))
+        shipped = Path(root)
+        self.assertTrue((shipped / "botvaders" / "imp-asleep.svg").is_file())
+        self.assertTrue((shipped / "botvaders" / "flake.svg").is_file())
+        self.assertTrue((shipped / "botvaders" / "flake-asleep.svg").is_file())
+        self.assertFalse((shipped / "botvaders" / "hut.svg").exists())
+        self.assertTrue((shipped / "primitives" / "circle-asleep.svg").is_file())
+        self.assertFalse((shipped / "botvaders" / "_src").exists())
+        font = Path(self.mod.repo_root()) / "fonts" / "Dashbots.ttf"
+        self.assertIn("Dashbots".encode("utf-16-be"), font.read_bytes())
+        self.assertEqual(self.mod.MENU_ENTRY["icon"], "\ue900")
+        self.assertEqual(self.mod.MENU_ENTRY["iconFont"], "Dashbots")
+
+    def test_icon_set_change_switches_every_live_mark(self):
+        root = Path(self.tmp.name) / "icons"
+        for name, ids in (("botvaders", ("ghost", "imp")), ("primitives", ("circle", "star"))):
+            folder = root / name
+            folder.mkdir(parents=True)
+            for icon_id in ids:
+                (folder / f"{icon_id}.svg").write_text("<svg></svg>", encoding="utf-8")
+                (folder / f"{icon_id}-asleep.svg").write_text("<svg></svg>", encoding="utf-8")
+        os.environ["DASHBOTS_ICONS"] = str(root)
+        config = Path(self.tmp.name) / "config-icons"
+        config.write_text("icons botvaders\n", encoding="utf-8")
+        os.environ["DASHBOTS_CONFIG"] = str(config)
+        real_alive = self.mod.pid_alive
+        self.mod.pid_alive = lambda pid: int(pid) >= 1000
+        try:
+            created = []
+            for index in range(2):
+                stamp = f"2026-01-01T00:00:0{index + 1}Z"
+                created.append(stamp)
+                self.mod.now_stamp = lambda stamp=stamp: stamp
+                os.environ["DASHBOTS_HOOK_PID"] = str(1000 + index)
+                self.hook({
+                    "hook_event_name": "SessionStart",
+                    "sessionId": f"s{index}",
+                    "cwd": "/work/demo",
+                })
+            before = [self.record(f"s{index}") for index in range(2)]
+            self.assertEqual(sorted(item["body"] for item in before), ["ghost", "imp"])
+            config.write_text("icons primitives\n", encoding="utf-8")
+            self.mod.now_stamp = lambda: "2026-01-01T00:00:09Z"
+            self.assertEqual(self.mod.cmd_rebody(["rebody"]), 0)
+            after = [self.record(f"s{index}") for index in range(2)]
+            self.assertEqual(sorted(item["body"] for item in after), ["circle", "star"])
+            for index, item in enumerate(after):
+                self.assertEqual(item["created_at"], created[index])
+                self.assertEqual(item["status"], before[index]["status"])
+                self.assertEqual(item["id"], f"s{index}")
+            listed = self.mod.live_records()
+            self.assertEqual([item["id"] for item in listed], ["s1", "s0"])
+            kept = [item["body"] for item in after]
+            self.assertEqual(self.mod.cmd_list(["list"]), 0)
+            self.assertEqual([self.record(f"s{index}")["body"] for index in range(2)], kept)
+        finally:
+            self.mod.pid_alive = real_alive
+            os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
+
+    def test_unknown_icon_set_falls_back(self):
+        self._use_icon_set("botvaders", ("imp",))
+        config = Path(os.environ["DASHBOTS_CONFIG"])
+        config.write_text("icons sideways\n", encoding="utf-8")
+        self.assertEqual(self.mod.read_config()["icons"], "botvaders")
+        self.assertEqual(self.mod.bodies(), ("imp",))
+
+    def test_sync_icons_replaces_the_old_flat_files(self):
+        src = Path(self.tmp.name) / "src"
+        dst = Path(self.tmp.name) / "dst"
+        (src / "botvaders").mkdir(parents=True)
+        (src / "botvaders" / "imp.svg").write_text("<svg></svg>", encoding="utf-8")
+        (src / "_src").mkdir()
+        (src / "_src" / "skip.svg").write_text("<svg></svg>", encoding="utf-8")
+        dst.mkdir()
+        (dst / "circle.svg").write_text("<svg></svg>", encoding="utf-8")
+        (dst / "oldset").mkdir()
+        (dst / "oldset" / "gone.svg").write_text("<svg></svg>", encoding="utf-8")
+        self.mod.sync_icons(str(src), str(dst))
+        self.assertTrue((dst / "botvaders" / "imp.svg").is_file())
+        self.assertFalse((dst / "circle.svg").exists())
+        self.assertFalse((dst / "oldset").exists())
+        self.assertFalse((dst / "_src").exists())
+        manifest = (dst / ".shipped").read_text(encoding="utf-8").splitlines()
+        self.assertIn("botvaders/imp.svg", manifest)
+        self.assertNotIn("circle.svg", manifest)
+
+    def test_sync_icons_keeps_svgs_the_user_added(self):
+        src = Path(self.tmp.name) / "src"
+        dst = Path(self.tmp.name) / "dst"
+        (src / "botvaders").mkdir(parents=True)
+        (src / "botvaders" / "imp.svg").write_text("<svg>imp</svg>", encoding="utf-8")
+        (src / "botvaders" / "hut.svg").write_text("<svg>hut</svg>", encoding="utf-8")
+        self.mod.sync_icons(str(src), str(dst))
+        (dst / "botvaders" / "flake.svg").write_text("<svg>flake</svg>", encoding="utf-8")
+        (dst / "cats").mkdir()
+        (dst / "cats" / "worm.svg").write_text("<svg>worm</svg>", encoding="utf-8")
+        (src / "botvaders" / "hut.svg").unlink()
+        (src / "botvaders" / "flake.svg").write_text("<svg>shipped-flake</svg>", encoding="utf-8")
+        self.mod.sync_icons(str(src), str(dst))
+        self.assertEqual((dst / "botvaders" / "flake.svg").read_text(encoding="utf-8"), "<svg>shipped-flake</svg>")
+        self.assertFalse((dst / "botvaders" / "hut.svg").exists())
+        self.assertTrue((dst / "cats" / "worm.svg").is_file())
+        shipped = (dst / ".shipped").read_text(encoding="utf-8")
+        self.assertIn("botvaders/flake.svg", shipped)
+        self.assertNotIn("hut.svg", shipped)
+        self.assertNotIn("cats/worm.svg", shipped)
+
+    def test_icons_root_prefers_the_installed_plugin(self):
+        installed = Path(self.tmp.name) / "installed"
+        shipped = Path(self.tmp.name) / "shipped"
+        installed.mkdir()
+        shipped.mkdir()
+        self.assertEqual(
+            self.mod.resolve_icons_root("", str(installed), str(shipped)),
+            str(installed),
+        )
+        self.assertEqual(
+            self.mod.resolve_icons_root("", str(installed / "missing"), str(shipped)),
+            str(shipped),
+        )
+        self.assertEqual(
+            self.mod.resolve_icons_root(str(shipped), str(installed), str(shipped)),
+            str(shipped),
+        )
+
+    def test_extra_svg_in_the_set_folder_is_an_icon(self):
+        self._use_icon_set("botvaders", ("imp",))
+        folder = Path(os.environ["DASHBOTS_ICONS"]) / "botvaders"
+        (folder / "flake.svg").write_text("<svg></svg>", encoding="utf-8")
+        (folder / "Notes.svg").write_text("<svg></svg>", encoding="utf-8")
+        (folder / "readme.txt").write_text("no", encoding="utf-8")
+        self.assertEqual(self.mod.bodies(), ("flake", "imp"))
+        cats = Path(os.environ["DASHBOTS_ICONS"]) / "cats"
+        cats.mkdir()
+        (cats / "worm.svg").write_text("<svg></svg>", encoding="utf-8")
+        config = Path(os.environ["DASHBOTS_CONFIG"])
+        config.write_text("icons cats\n", encoding="utf-8")
+        self.assertEqual(self.mod.read_config()["icons"], "cats")
+        self.assertEqual(self.mod.bodies(), ("worm",))
 
     def test_unsafe_id_is_dropped(self):
         self.hook({"hook_event_name": "SessionStart", "sessionId": "../etc/passwd", "cwd": "/work/demo"})
@@ -1068,14 +1237,17 @@ class DashbotsTest(unittest.TestCase):
     def test_parse_config(self):
         parsed = self.mod.parse_config(
             "# note\nswingMs 800\nanimate false\nplace workspaces\nplace sideways\n"
+            "icons primitives\nicons -bogus\n"
         )
         self.assertEqual(parsed["swingMs"], 800)
         self.assertFalse(parsed["animate"])
         self.assertEqual(parsed["place"], "workspaces")
+        self.assertEqual(parsed["icons"], "primitives")
         defaults = self.mod.parse_config("swingMs 0\nanimate maybe\n")
         self.assertEqual(defaults["swingMs"], 2000)
         self.assertTrue(defaults["animate"])
         self.assertEqual(defaults["place"], "center-right")
+        self.assertEqual(defaults["icons"], "botvaders")
 
     def test_install_config_keeps_an_existing_file(self):
         path = Path(self.tmp.name) / "config"

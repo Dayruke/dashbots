@@ -27,7 +27,7 @@ Remove it with `dashbots uninstall`. That drops the hooks, the plugin, the bar s
 
 While Dashbots is on, the widget slot is always there: one icon is added per live session, or a single `_` when none are alive—so you know that it's consuming (minimal!) system resources.
 
-You can toggle off animation, change anim speed, change the position of the widget slot, and the icon graphics are accessible enough to change.
+You can toggle off animation, change the swing speed, move the slot, and pick the icon set (`botvaders` or `primitives`, or a folder you add).
 
 Hover shows the harness, the directory name, and the current activity. On Grok, Claude, and Gemini, a prompt's activity is the first line of that prompt, a tool's activity is the tool name, and a permission prompt says `needs a decision`. Antigravity shows `thinking` at the start of a turn and the tool name while a tool runs. `ask_question` and `ask_permission` say `needs a decision`.
 
@@ -39,12 +39,14 @@ Left click focuses that session's terminal and switches to its workspace.
 
 Each mark is a white SVG. The bar mixes that white with a theme color for all the colors a bot icon assumes.
 
-A new session gets one of the four bodies at random: circle, blob, triangle, or square. 
+A new session picks one icon at random from the set in the bar config. `icons botvaders` is the default. `icons primitives` is the other shipped set. An icon already on the bar is skipped until every icon in that set is in use. Saving a different set moves the marks that are already up onto it. Awake eyes are open holes with a small shine. Asleep eyes are dashes.
+
+The set is the SVG files in `~/.config/omarchy/plugins/dashbots/icons/<name>/`. Add `{id}.svg` and a new session can use it. `{id}-asleep.svg` is the dash-eyed face; without that file the awake face stays up. A new folder there is another set: name it with `icons`. Install refreshes the shipped files and leaves files you added. Uninstall removes the plugin folder, added icons included.
 
 | Eyes | What it means |
 | --- | --- |
-| Two dots | Open. Present, working, waiting on you, or the turn failed. |
-| Two dashes | Asleep. This turn ended. |
+| Open | Present, working, waiting on you, or the turn failed. |
+| Dashes | Asleep. This turn ended. |
 | `_` | No session. Drawn in the muted color, not as a body. |
 
 | Tint | When |
@@ -52,8 +54,8 @@ A new session gets one of the four bodies at random: circle, blob, triangle, or 
 | Foreground, still | Alive. Present, and the activity is unknown. |
 | Accent, swinging | Working. The body leans side to side and bobs. |
 | Muted, still | Asleep. This turn ended. |
-| Accent, still | Needs a decision. The dots stay open. |
-| Urgent, still | The turn failed. The dots stay open. |
+| Accent, still | Needs a decision. The eyes stay open. |
+| Urgent, still | The turn failed. The eyes stay open. |
 
 ## How it works
 

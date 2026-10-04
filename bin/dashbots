@@ -23,7 +23,8 @@ ADDR_RE = re.compile(r"^0x[0-9a-fA-F]+$")
 ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 HARNESS_RE = re.compile(r"[a-z0-9_-]{1,32}")
 STATUSES = ("alive", "working", "waiting", "error")
-BODIES = ("circle", "blob", "triangle", "square")
+DEFAULT_ICONS = "botvaders"
+ICON_SET_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 ADAPTERS = ("grok", "claude", "gemini", "agy")
 SCAN_NAMES = ("grok", "claude", "gemini", "agy", "codex", "opencode")
 
@@ -168,6 +169,7 @@ def parse_config(text):
     swing = 2000
     animate = True
     place = "center-right"
+    icons = DEFAULT_ICONS
     for raw in str(text or "").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -191,16 +193,91 @@ def parse_config(text):
                 animate = False
         elif key == "place" and value in PLACES:
             place = value
-    return {"swingMs": swing, "animate": animate, "place": place}
+        elif key == "icons":
+            token = value.lower()
+            if ICON_SET_RE.fullmatch(token):
+                icons = token
+    return {"swingMs": swing, "animate": animate, "place": place, "icons": icons}
 
 
 def read_config():
     path = config_path()
     try:
         with open(path, encoding="utf-8") as handle:
-            return parse_config(handle.read())
+            parsed = parse_config(handle.read())
     except OSError:
-        return parse_config("")
+        parsed = parse_config("")
+    parsed["icons"] = active_icons(parsed)
+    return parsed
+
+
+def shipped_icons_root():
+    return os.path.join(repo_root(), "plugin", "icons")
+
+
+def resolve_icons_root(override, installed, shipped):
+    """The folder the bar draws. An override wins, then the installed plugin."""
+    if override:
+        return override
+    if installed and os.path.isdir(installed):
+        return installed
+    return shipped
+
+
+def icons_root():
+    return resolve_icons_root(
+        os.environ.get("DASHBOTS_ICONS"),
+        os.path.join(plugin_dir(), "icons"),
+        shipped_icons_root(),
+    )
+
+
+def icon_sets():
+    root = icons_root()
+    found = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    for name in names:
+        if not ICON_SET_RE.fullmatch(name):
+            continue
+        if os.path.isdir(os.path.join(root, name)):
+            found.append(name)
+    found.sort()
+    return found
+
+
+def active_icons(settings=None):
+    """The set the bar draws. A missing name falls back to botvaders."""
+    if settings is None:
+        settings = read_config()
+    requested = str(settings.get("icons") or DEFAULT_ICONS)
+    available = icon_sets()
+    if requested in available:
+        return requested
+    if DEFAULT_ICONS in available:
+        return DEFAULT_ICONS
+    return available[0] if available else DEFAULT_ICONS
+
+
+def bodies(set_name=None, root=None):
+    """Icon ids in one set. Awake file is {id}.svg. Asleep is {id}-asleep.svg."""
+    name = active_icons() if set_name is None else set_name
+    folder = os.path.join(root or icons_root(), name)
+    found = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return ()
+    for filename in names:
+        if not filename.endswith(".svg") or filename.endswith("-asleep.svg"):
+            continue
+        stem = filename[: -len(".svg")]
+        if ICON_SET_RE.fullmatch(stem):
+            found.append(stem)
+    found.sort()
+    return tuple(found)
 
 
 def install_config():
@@ -225,8 +302,10 @@ def install_config():
 
 
 MENU_ID = "trigger.toggle.dashbots"
+# U+E900 in fonts/Dashbots.ttf. The menu draws a glyph, not an SVG.
 MENU_ENTRY = {
-    "icon": "\U000f0765",
+    "icon": "\ue900",
+    "iconFont": "Dashbots",
     "label": "Dashbots",
     "checked": "omarchy-toggle-enabled dashbots",
     "action": "omarchy-toggle dashbots",
@@ -277,38 +356,46 @@ def read_record(path):
     return data
 
 
-def sanitize_body(value):
+def sanitize_body(value, catalog=None):
     text = str(value or "").strip().lower()
-    if text in BODIES:
+    if not ICON_SET_RE.fullmatch(text):
+        return ""
+    if catalog is None:
+        catalog = bodies()
+    if text in catalog:
         return text
     return ""
 
 
 def choose_body(except_id=None):
-    """Pick a body that no other live session is using, if one is free."""
-    counts = {body: 0 for body in BODIES}
+    """Pick an icon that no other live session is using, if one is free."""
+    catalog = bodies()
+    if not catalog:
+        return ""
+    counts = {body: 0 for body in catalog}
     skip = sanitize_id(except_id or "")
     for record in iter_records():
         if sanitize_id(record.get("id")) == skip:
             continue
         if not pid_alive(record.get("pid")):
             continue
-        body = sanitize_body(record.get("body"))
+        body = sanitize_body(record.get("body"), catalog)
         if body:
             counts[body] += 1
     least = min(counts.values())
-    pool = [body for body in BODIES if counts[body] == least]
+    pool = [body for body in catalog if counts[body] == least]
     return random.choice(pool)
 
 
 def ensure_body(record):
-    body = sanitize_body(record.get("body"))
+    catalog = bodies()
+    body = sanitize_body(record.get("body"), catalog)
     if body:
         record["body"] = body
         return body
     session_id = sanitize_id(record.get("id"))
     previous = read_record(session_path(session_id)) if session_id else None
-    kept = sanitize_body(previous.get("body")) if previous else ""
+    kept = sanitize_body(previous.get("body"), catalog) if previous else ""
     record["body"] = kept or choose_body(session_id)
     return record["body"]
 
@@ -1049,13 +1136,25 @@ def cmd_focus(argv):
     return 0
 
 
-def cmd_list(_argv=None):
-    records = live_records()
+def adopt_icon_set(records):
+    """Move live marks onto the current set. A mark already in the set stays put."""
+    catalog = bodies()
+    if not catalog:
+        return records
     for record in records:
-        if sanitize_body(record.get("body")):
+        if sanitize_body(record.get("body"), catalog):
             continue
         ensure_body(record)
         write_record(record)
+        written = read_record(session_path(sanitize_id(record.get("id"))))
+        if written:
+            record.clear()
+            record.update(written)
+    return records
+
+
+def cmd_list(_argv=None):
+    records = adopt_icon_set(live_records())
     print(json.dumps(records, sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -1682,27 +1781,168 @@ def copy_file(src, dst):
     os.chmod(dst, 0o644)
 
 
+def svg_files(root):
+    found = {}
+    if not os.path.isdir(root):
+        return found
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name for name in dirnames if name != "_src" and not name.startswith(".")
+        ]
+        for filename in filenames:
+            if not filename.endswith(".svg"):
+                continue
+            full = os.path.join(dirpath, filename)
+            found[os.path.relpath(full, root)] = full
+    return found
+
+
+SHIPPED_MANIFEST = ".shipped"
+
+
+def within_dir(root, rel):
+    base = os.path.abspath(root)
+    path = os.path.abspath(os.path.join(base, rel))
+    if path == base or path.startswith(base + os.sep):
+        return path
+    return ""
+
+
+def read_shipped_manifest(path):
+    """Paths shipped last time. None means this destination has no record yet."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    found = []
+    for line in lines:
+        rel = line.strip()
+        if not rel or rel.startswith("#") or rel.startswith("/") or "\\" in rel:
+            continue
+        parts = rel.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            continue
+        found.append(rel)
+    return found
+
+
+def write_shipped_manifest(directory, rels):
+    path = os.path.join(directory, SHIPPED_MANIFEST)
+    body = "".join(rel + "\n" for rel in sorted(rels))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".shipped-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def sync_icons(source, destination):
+    """Copy shipped SVGs.
+
+    The first sync drops leftovers from older installs. After that, a file
+    the user added stays. A shipped file that left the source is removed.
+    """
+    os.makedirs(destination, exist_ok=True)
+    wanted = svg_files(source)
+    previous = read_shipped_manifest(os.path.join(destination, SHIPPED_MANIFEST))
+    for rel, src in wanted.items():
+        dest = within_dir(destination, rel)
+        if not dest:
+            continue
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        copy_file(src, dest)
+    if previous is None:
+        stale = [rel for rel in svg_files(destination) if rel not in wanted]
+    else:
+        stale = [rel for rel in previous if rel not in wanted]
+    for rel in stale:
+        dest = within_dir(destination, rel)
+        if not dest:
+            continue
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+    write_shipped_manifest(destination, wanted)
+    for dirpath, _dirnames, _filenames in os.walk(destination, topdown=False):
+        if os.path.abspath(dirpath) == os.path.abspath(destination):
+            continue
+        try:
+            if not os.listdir(dirpath):
+                os.rmdir(dirpath)
+        except OSError:
+            pass
+
+
 def copy_plugin():
     source = os.path.join(repo_root(), "plugin")
     destination = plugin_dir()
     os.makedirs(destination, exist_ok=True)
     for name in ("manifest.json", "BarWidget.qml"):
         copy_file(os.path.join(source, name), os.path.join(destination, name))
-    icons_src = os.path.join(source, "icons")
-    icons_dst = os.path.join(destination, "icons")
-    os.makedirs(icons_dst, exist_ok=True)
-    wanted = set()
-    for name in os.listdir(icons_src):
-        if not name.endswith(".svg"):
-            continue
-        wanted.add(name)
-        copy_file(os.path.join(icons_src, name), os.path.join(icons_dst, name))
-    for name in os.listdir(icons_dst):
-        if name.endswith(".svg") and name not in wanted:
-            try:
-                os.remove(os.path.join(icons_dst, name))
-            except OSError:
-                pass
+    sync_icons(os.path.join(source, "icons"), os.path.join(destination, "icons"))
+
+
+def icon_font_path():
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(home(), ".local", "share")
+    return os.path.join(base, "fonts", "dashbots", "Dashbots.ttf")
+
+
+def install_icon_font():
+    src = os.path.join(repo_root(), "fonts", "Dashbots.ttf")
+    if not os.path.isfile(src):
+        print("skipped menu icon: fonts/Dashbots.ttf is missing", file=sys.stderr)
+        return False
+    dest = icon_font_path()
+    parent = os.path.dirname(dest)
+    os.makedirs(parent, exist_ok=True)
+    copy_file(src, dest)
+    try:
+        subprocess.run(
+            ["fc-cache", "-f", parent],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return True
+
+
+def uninstall_icon_font():
+    dest = icon_font_path()
+    parent = os.path.dirname(dest)
+    try:
+        os.remove(dest)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    try:
+        if parent and not os.listdir(parent):
+            os.rmdir(parent)
+    except OSError:
+        pass
+    try:
+        subprocess.run(
+            ["fc-cache", "-f", parent],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def shell_up():
@@ -2157,6 +2397,7 @@ def cmd_install(_argv=None):
         5000,
     )
     copy_plugin()
+    install_icon_font()
     install_config()
     validate = subprocess.run(
         ["omarchy", "plugin", "validate", plugin_dir()],
@@ -2306,6 +2547,7 @@ def cmd_uninstall(_argv=None):
         if os.path.basename(target) == "dashbots" and target.endswith(os.path.join("bin", "dashbots")):
             os.remove(destination)
     uninstall_menu_trigger()
+    uninstall_icon_font()
     print("Uninstalled dashbots. Session records were left in the state directory.")
     return 0
 
@@ -2359,12 +2601,19 @@ def cmd_status(_argv=None):
     print(f"swingMs: {settings['swingMs']}")
     print(f"animate: {'true' if settings['animate'] else 'false'}")
     print(f"place: {settings['place']}")
+    print(f"icons: {settings['icons']}")
+    return 0
+
+
+def cmd_rebody(_argv=None):
+    """Move live marks onto the icon set named in the config."""
+    adopt_icon_set(live_records())
     return 0
 
 
 def usage():
     print(
-        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|focus|place|install|uninstall|status>",
+        "Usage: dashbots <report|clear|hook|watch|gc|scan|list|focus|place|rebody|install|uninstall|status>",
         file=sys.stderr,
     )
 
@@ -2386,6 +2635,7 @@ def main(argv=None):
         "list": cmd_list,
         "focus": cmd_focus,
         "place": cmd_place,
+        "rebody": cmd_rebody,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "status": cmd_status,

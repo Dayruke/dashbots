@@ -6,6 +6,12 @@
 #   center-right: just to the right of the weather.
 #   center-left: just to the left of the clock and weather.
 #   workspaces: just to the left of the workspace listing.
+# icons is a folder under ~/.config/omarchy/plugins/dashbots/icons.
+#   botvaders is the default. primitives is the other shipped set.
+#   An SVG added to that folder becomes an icon. A new folder is a new set.
+#   A new session picks one icon from that set. An icon already showing
+#   is skipped until every icon in the set is on the bar.
+#   Saving a different set moves the marks that are already up onto it.
 #
 # Saving this file applies the values. The bar layout reloads on its own.
 # If a change does not show, run: omarchy restart shell
@@ -13,3 +19,4 @@
 swingMs 2000
 animate true
 place center-right
+icons botvaders

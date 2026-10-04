@@ -16,9 +16,19 @@ BarWidget {
 
   // From ~/.config/dashbots/config. swingMs is one full cycle.
   // Lower is faster. animate false keeps a working icon still.
+  // icons is a folder under the installed plugin icons directory.
+  // botvaders is the default. primitives ships too. A new folder is a set.
   property int swingMs: 2000
   property bool animate: true
   property string place: "center-right"
+  // The set on screen. A config change keeps this until the new icons are ready.
+  property string shownIcons: "botvaders"
+  property string pendingIcons: ""
+  property string wantedIcons: ""
+  property bool switchingIcons: false
+  property bool iconSetQueued: false
+  property int listGeneration: 0
+  property int switchGeneration: -1
   property string appliedPlace: ""
   property bool placeQueued: false
 
@@ -41,6 +51,7 @@ BarWidget {
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
   readonly property string sessionsDir: home + "/.local/state/dashbots/sessions"
   readonly property string binPath: home + "/.local/bin/dashbots"
+  readonly property string iconsDir: home + "/.config/omarchy/plugins/dashbots/icons"
   readonly property string configPath: {
     var base = Quickshell.env("XDG_CONFIG_HOME")
     if (!base) base = root.home + "/.config"
@@ -83,13 +94,17 @@ BarWidget {
   implicitWidth: toggleOn ? (vertical ? barSize : marksGrid.implicitWidth) : 0
   implicitHeight: toggleOn ? (vertical ? marksGrid.implicitHeight : barSize) : 0
 
-  // The reporter picks a body per live session and keeps it. The widget
-  // only draws the name it was given.
+  // The reporter picks one icon per live session and keeps it. The widget
+  // draws that file from the set named in the config.
   function bodyName(session) {
     var body = String(session && session.body || "").toLowerCase()
-    if (body === "circle" || body === "blob" || body === "triangle" || body === "square")
+    if (/^[a-z0-9][a-z0-9_-]{0,31}$/.test(body))
       return body
-    return "circle"
+    return fallbackBody()
+  }
+
+  function fallbackBody() {
+    return root.shownIcons === "primitives" ? "circle" : "imp"
   }
 
   function asleep(session) {
@@ -98,10 +113,18 @@ BarWidget {
         && String(session.activity || "") !== "needs a decision"
   }
 
-  function faceUrl(session) {
+  // attempt 0 is the face for this status. 1 drops a missing asleep file
+  // and keeps the same body. 2 is the shipped fallback.
+  function faceUrl(session, attempt) {
+    var n = attempt || 0
+    if (n >= 2) {
+      var fbSet = root.shownIcons === "primitives" ? "primitives" : "botvaders"
+      var fbBody = fbSet === "primitives" ? "circle" : "imp"
+      return Qt.resolvedUrl("icons/" + fbSet + "/" + fbBody + ".svg")
+    }
     var body = bodyName(session)
-    var face = asleep(session) ? "-sleep" : ""
-    return Qt.resolvedUrl("icons/" + body + face + ".svg")
+    var face = n === 0 && asleep(session) ? "-asleep" : ""
+    return Qt.resolvedUrl("icons/" + root.shownIcons + "/" + body + face + ".svg")
   }
 
   function harnessName(harness) {
@@ -193,12 +216,19 @@ BarWidget {
   }
 
   function runList() {
-    if (!root.toggleOn) return
+    if (!root.toggleOn) {
+      if (root.switchingIcons) root.listQueued = true
+      return
+    }
     if (listProc.running) {
       root.listQueued = true
       return
     }
     root.listQueued = false
+    root.listGeneration += 1
+    listProc.generation = root.listGeneration
+    if (root.switchingIcons)
+      root.switchGeneration = root.listGeneration
     listProc.buf = ""
     listProc.running = true
   }
@@ -235,6 +265,7 @@ BarWidget {
     var swing = 2000
     var motion = true
     var spot = "center-right"
+    var set = "botvaders"
     var lines = String(text || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim()
@@ -252,12 +283,32 @@ BarWidget {
         if (word === "false" || word === "no" || word === "0" || word === "off") motion = false
       } else if (key === "place") {
         if (value === "center-right" || value === "center-left" || value === "workspaces") spot = value
+      } else if (key === "icons") {
+        var token = value.toLowerCase()
+        if (/^[a-z0-9][a-z0-9_-]{0,31}$/.test(token)) set = token
       }
     }
     root.swingMs = swing
     root.animate = motion
     root.place = spot
     if (spot !== root.appliedPlace) root.runPlace()
+    root.requestIcons(set)
+  }
+
+  // Same set: leave the marks alone. A new folder has to exist. list then
+  // gives every live mark an icon from it, and the pictures change together.
+  function requestIcons(set) {
+    if (!set) return
+    if (set === root.shownIcons || (root.switchingIcons && set === root.pendingIcons))
+      return
+    root.wantedIcons = set
+    if (iconSetProc.running) {
+      root.iconSetQueued = true
+      return
+    }
+    root.iconSetQueued = false
+    iconSetProc.command = ["test", "-d", root.iconsDir + "/" + set]
+    iconSetProc.running = true
   }
 
   function runPlace() {
@@ -381,15 +432,47 @@ BarWidget {
   }
 
   Process {
+    id: iconSetProc
+    command: ["test", "-d", root.iconsDir]
+    onExited: function(exitCode) {
+      if (root.iconSetQueued) {
+        root.iconSetQueued = false
+        Qt.callLater(function() { root.requestIcons(root.wantedIcons) })
+        return
+      }
+      if (exitCode !== 0) return
+      var set = root.wantedIcons
+      if (!set || set === root.shownIcons || (root.switchingIcons && set === root.pendingIcons))
+        return
+      root.pendingIcons = set
+      root.switchingIcons = true
+      root.switchGeneration = -1
+      root.runList()
+    }
+  }
+
+  Process {
     id: listProc
     command: [root.binPath, "list"]
     property string buf: ""
+    property int generation: 0
     stdout: SplitParser {
       onRead: function(line) { listProc.buf += line }
     }
     onExited: function(exitCode) {
-      if (root.toggleOn && exitCode === 0)
+      var flip = root.switchingIcons
+          && exitCode === 0
+          && listProc.generation === root.switchGeneration
+          && !root.listQueued
+      if (flip)
+        root.shownIcons = root.pendingIcons
+      if (root.toggleOn && exitCode === 0 && (flip || !root.switchingIcons))
         root.applyList(listProc.buf)
+      if (flip) {
+        root.switchingIcons = false
+        root.pendingIcons = ""
+        root.switchGeneration = -1
+      }
       if (!root.listQueued || !root.toggleOn) {
         root.listQueued = false
         return
@@ -412,6 +495,7 @@ BarWidget {
         readonly property bool blank: modelData && modelData.empty === true
         readonly property string sessionStatus: blank ? "" : String(modelData.status || "")
         readonly property bool moving: sessionStatus === "working" && root.animate
+        readonly property string iconKey: root.shownIcons + "/" + root.bodyName(modelData) + (root.asleep(modelData) ? "-asleep" : "")
 
         bar: root.bar
         text: blank ? "_" : ""
@@ -447,14 +531,21 @@ BarWidget {
 
           Image {
             id: faceImage
+            property int attempt: 0
+            property string shownKey: button.iconKey
             anchors.fill: parent
-            source: root.faceUrl(button.modelData)
+            source: root.faceUrl(button.modelData, attempt)
             fillMode: Image.PreserveAspectFit
             smooth: true
             visible: false
             layer.enabled: true
             sourceSize.width: Math.round(width * Screen.devicePixelRatio)
             sourceSize.height: Math.round(height * Screen.devicePixelRatio)
+            onShownKeyChanged: attempt = 0
+            onStatusChanged: {
+              if (status === Image.Error && attempt < 2)
+                attempt += 1
+            }
           }
 
           MultiEffect {
