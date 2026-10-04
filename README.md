@@ -39,9 +39,9 @@ Left click focuses that session's terminal and switches to its workspace.
 
 Each mark is a white SVG. The bar mixes that white with a theme color for all the colors a bot icon assumes.
 
-A new session picks one icon at random from the set in the bar config. `icons botvaders` is the default. `icons primitives` is the other shipped set. An icon already on the bar is skipped until every icon in that set is in use. Saving a different set moves the marks that are already up onto it. Awake eyes are open holes with a small shine. Asleep eyes are dashes.
+A new session picks one icon at random from the set in the bar config. `icons botvaders` is the default. `icons primitives` is the other shipped set. An icon already on the bar is skipped until every icon in that set is in use. Saving a different set moves the marks that are already up onto it, when that folder is already there. Awake eyes are open holes with a small shine. Asleep eyes are dashes.
 
-The set is the SVG files in `~/.config/omarchy/plugins/dashbots/icons/<name>/`. Add `{id}.svg` and a new session can use it. `{id}-asleep.svg` is the dash-eyed face; without that file the awake face stays up. A new folder there is another set: name it with `icons`. Install refreshes the shipped files and leaves files you added. Uninstall removes the plugin folder, added icons included.
+The set is the SVG files in `~/.config/omarchy/plugins/dashbots/icons/<name>/`. The `icons` value is the folder name, so `icons flowers` uses `flowers/`. Each icon is `{id}.svg`. `{id}` is lowercase letters, digits, `_`, or `-`, up to 32 characters. `{id}-asleep.svg` is the dash-eyed face; without that file the awake face stays up. Install refreshes the shipped files and leaves files you added in that directory. A folder added under `plugin/icons/` in the repo is copied on install, and a later install drops it if the repo no longer has it. Uninstall removes the plugin folder, added icons included.
 
 | Eyes | What it means |
 | --- | --- |
