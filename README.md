@@ -1,4 +1,6 @@
-# Dashbots
+
+
+# Dashbots  <img src="images/crab.png" alt="Dashbots" width="32">
 
 You instantly launch agents in Omarchy. That's great, but you end up with scattered agent sessions that get tricky to track. I like ideas that Grok Bots introduced, but that application is best for focused work with long-lived, well-harnessed agents. 
 
@@ -6,7 +8,7 @@ You instantly launch agents in Omarchy. That's great, but you end up with scatte
 
 One icon per live session. Designed for Omarchy and its lovely theming.
 
-![Dashbots bar screenshot](screenshots/dashbots.png)
+![Dashbots bar screenshot](images/dashbots.png)
 
 **Lightweight**. Runs at about 14 MB and 0.3% of one core.
 
@@ -36,6 +38,8 @@ Left click focuses that session's terminal and switches to its workspace.
 `omarchy toggle dashbots` turns it off and on. The same switch is in the Omarchy menu under Trigger, then Toggle. A check mark on that row means it is on. The flag is `~/.local/state/omarchy/toggles/dashbots`.
 
 ## Icon reference
+
+![Botvaders and primitives](images/icons-grid.png)
 
 Each mark is a white SVG. The bar mixes that white with a theme color for all the colors a bot icon assumes.
 
