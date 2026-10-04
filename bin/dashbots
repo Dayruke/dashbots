@@ -302,10 +302,8 @@ def install_config():
 
 
 MENU_ID = "trigger.toggle.dashbots"
-# U+E900 in fonts/Dashbots.ttf. The menu draws a glyph, not an SVG.
 MENU_ENTRY = {
-    "icon": "\ue900",
-    "iconFont": "Dashbots",
+    "icon": "■■",
     "label": "Dashbots",
     "checked": "omarchy-toggle-enabled dashbots",
     "action": "omarchy-toggle dashbots",
@@ -1893,35 +1891,13 @@ def copy_plugin():
     sync_icons(os.path.join(source, "icons"), os.path.join(destination, "icons"))
 
 
-def icon_font_path():
+def legacy_icon_font_path():
     base = os.environ.get("XDG_DATA_HOME") or os.path.join(home(), ".local", "share")
     return os.path.join(base, "fonts", "dashbots", "Dashbots.ttf")
 
 
-def install_icon_font():
-    src = os.path.join(repo_root(), "fonts", "Dashbots.ttf")
-    if not os.path.isfile(src):
-        print("skipped menu icon: fonts/Dashbots.ttf is missing", file=sys.stderr)
-        return False
-    dest = icon_font_path()
-    parent = os.path.dirname(dest)
-    os.makedirs(parent, exist_ok=True)
-    copy_file(src, dest)
-    try:
-        subprocess.run(
-            ["fc-cache", "-f", parent],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return True
-
-
-def uninstall_icon_font():
-    dest = icon_font_path()
+def remove_legacy_icon_font():
+    dest = legacy_icon_font_path()
     parent = os.path.dirname(dest)
     try:
         os.remove(dest)
@@ -2397,7 +2373,7 @@ def cmd_install(_argv=None):
         5000,
     )
     copy_plugin()
-    install_icon_font()
+    remove_legacy_icon_font()
     install_config()
     validate = subprocess.run(
         ["omarchy", "plugin", "validate", plugin_dir()],
@@ -2547,7 +2523,7 @@ def cmd_uninstall(_argv=None):
         if os.path.basename(target) == "dashbots" and target.endswith(os.path.join("bin", "dashbots")):
             os.remove(destination)
     uninstall_menu_trigger()
-    uninstall_icon_font()
+    remove_legacy_icon_font()
     print("Uninstalled dashbots. Session records were left in the state directory.")
     return 0
 

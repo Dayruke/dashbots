@@ -519,7 +519,7 @@ class DashbotsTest(unittest.TestCase):
             self.mod.pid_alive = real_alive
             os.environ["DASHBOTS_HOOK_PID"] = str(os.getpid())
 
-    def test_shipped_icon_sets_and_menu_imp(self):
+    def test_shipped_icon_sets_and_menu_icon(self):
         os.environ.pop("DASHBOTS_ICONS", None)
         root = self.mod.shipped_icons_root()
         self.assertIn("imp", self.mod.bodies("botvaders", root))
@@ -535,10 +535,8 @@ class DashbotsTest(unittest.TestCase):
         self.assertFalse((shipped / "botvaders" / "hut.svg").exists())
         self.assertTrue((shipped / "primitives" / "circle-asleep.svg").is_file())
         self.assertFalse((shipped / "botvaders" / "_src").exists())
-        font = Path(self.mod.repo_root()) / "fonts" / "Dashbots.ttf"
-        self.assertIn("Dashbots".encode("utf-16-be"), font.read_bytes())
-        self.assertEqual(self.mod.MENU_ENTRY["icon"], "\ue900")
-        self.assertEqual(self.mod.MENU_ENTRY["iconFont"], "Dashbots")
+        self.assertEqual(self.mod.MENU_ENTRY["icon"], "■■")
+        self.assertNotIn("iconFont", self.mod.MENU_ENTRY)
 
     def test_icon_set_change_switches_every_live_mark(self):
         root = Path(self.tmp.name) / "icons"
