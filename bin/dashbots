@@ -2174,12 +2174,6 @@ def cmd_install(_argv=None):
     install_units()
     menu_ok = install_menu_trigger()
     print("Installed dashbots.")
-    print(
-        "Hooks load when a session starts. A session already open, including this one, "
-        "will not report until it is restarted. Grok, Claude, and Gemini are not drawn "
-        "by the process scan. Antigravity keeps a still mark until that process is "
-        "restarted and a hook fires."
-    )
     print("Toggle with: omarchy toggle dashbots")
     if menu_ok:
         print("The same switch is in the Omarchy menu: Trigger, Toggle, Dashbots.")
