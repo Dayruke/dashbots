@@ -14,6 +14,8 @@
 #   is skipped until every icon in the set is on the bar.
 #   Saving a different set moves the marks that are already up onto it.
 #
+# Install rewrites this file from the current template and keeps the values below.
+#
 # Saving this file applies the values. The bar layout reloads on its own.
 # If a change does not show, run: omarchy restart shell
 

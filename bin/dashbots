@@ -25,6 +25,7 @@ HARNESS_RE = re.compile(r"[a-z0-9_-]{1,32}")
 STATUSES = ("alive", "working", "waiting", "error")
 DEFAULT_ICONS = "botvaders"
 ICON_SET_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+CONFIG_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z][A-Za-z0-9]*)(\s+)(\S+)(.*)$")
 ADAPTERS = ("grok", "claude", "gemini", "agy")
 SCAN_NAMES = ("grok", "claude", "gemini", "agy", "codex", "opencode")
 
@@ -168,11 +169,8 @@ def default_config_text():
         return handle.read()
 
 
-def parse_config(text):
-    swing = 2000
-    animate = True
-    place = "center-right"
-    icons = DEFAULT_ICONS
+def config_assignments(text):
+    """Key and value tokens from a config. Comments and blank lines are skipped."""
     for raw in str(text or "").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -180,27 +178,76 @@ def parse_config(text):
         parts = line.split()
         if len(parts) < 2:
             continue
-        key, value = parts[0], parts[1]
-        if key == "swingMs":
-            try:
-                number = int(value)
-            except ValueError:
-                continue
-            if number > 0:
-                swing = number
-        elif key == "animate":
-            word = value.lower()
-            if word in ("true", "yes", "1", "on"):
-                animate = True
-            elif word in ("false", "no", "0", "off"):
-                animate = False
-        elif key == "place" and value in PLACES:
-            place = value
-        elif key == "icons":
-            token = value.lower()
-            if ICON_SET_RE.fullmatch(token):
-                icons = token
-    return {"swingMs": swing, "animate": animate, "place": place, "icons": icons}
+        yield parts[0], parts[1]
+
+
+def apply_config_assignment(settings, key, value):
+    """Store one accepted assignment. A rejected value leaves settings unchanged."""
+    if key == "swingMs":
+        try:
+            number = int(value)
+        except ValueError:
+            return
+        if number > 0:
+            settings["swingMs"] = number
+    elif key == "animate":
+        word = value.lower()
+        if word in ("true", "yes", "1", "on"):
+            settings["animate"] = True
+        elif word in ("false", "no", "0", "off"):
+            settings["animate"] = False
+    elif key == "place" and value in PLACES:
+        settings["place"] = value
+    elif key == "icons":
+        token = value.lower()
+        if ICON_SET_RE.fullmatch(token):
+            settings["icons"] = token
+
+
+def parse_config(text):
+    settings = {
+        "swingMs": 2000,
+        "animate": True,
+        "place": "center-right",
+        "icons": DEFAULT_ICONS,
+    }
+    for key, value in config_assignments(text):
+        apply_config_assignment(settings, key, value)
+    return settings
+
+
+def config_overrides(text):
+    """Values this file sets. A missing or rejected key is left out."""
+    found = {}
+    for key, value in config_assignments(text):
+        apply_config_assignment(found, key, value)
+    return found
+
+
+def format_config_value(key, value):
+    if key == "animate":
+        return "true" if value else "false"
+    return str(value)
+
+
+def render_config(overrides):
+    """Shipped config with saved values written onto the matching lines."""
+    pieces = []
+    for raw in default_config_text().splitlines(keepends=True):
+        ending = ""
+        body = raw
+        if body.endswith("\n"):
+            body = body[:-1]
+            ending = "\n"
+        match = CONFIG_ASSIGN_RE.match(body)
+        if match and match.group(2) in overrides:
+            key = match.group(2)
+            body = (
+                f"{match.group(1)}{key}{match.group(3)}"
+                f"{format_config_value(key, overrides[key])}{match.group(5)}"
+            )
+        pieces.append(body + ending)
+    return "".join(pieces)
 
 
 def read_config():
@@ -283,17 +330,14 @@ def bodies(set_name=None, root=None):
     return tuple(found)
 
 
-def install_config():
-    path = config_path()
-    if os.path.exists(path):
-        return
+def write_config_file(path, text):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=parent or ".", prefix=".tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(default_config_text())
+            handle.write(text)
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except Exception:
@@ -302,6 +346,31 @@ def install_config():
         except OSError:
             pass
         raise
+
+
+def install_config():
+    """Write the shipped config. An existing file is refreshed.
+
+    Comments and settings added since that file was written come from the
+    current template. A value the file already sets is kept when this version
+    still accepts it. A rejected value is dropped. The file is left untouched
+    when the refresh would not change it, and when it cannot be read.
+    """
+    path = config_path()
+    existing = None
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                existing = handle.read()
+        except (OSError, UnicodeError) as exc:
+            print(f"skipped config update: {exc}", file=sys.stderr)
+            return
+    updated = render_config(config_overrides(existing or ""))
+    if existing == updated:
+        return
+    write_config_file(path, updated)
+    if existing is not None:
+        print(f"config: refreshed {path}")
 
 
 MENU_ID = "trigger.toggle.dashbots"

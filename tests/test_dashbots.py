@@ -1248,14 +1248,62 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(defaults["place"], "center-right")
         self.assertEqual(defaults["icons"], "botvaders")
 
-    def test_install_config_keeps_an_existing_file(self):
+    def test_config_overrides_skip_rejected_values(self):
+        self.assertEqual(
+            self.mod.config_overrides(
+                "swingMs 0\nanimate maybe\nplace sideways\nicons -bogus\n"
+            ),
+            {},
+        )
+        self.assertEqual(
+            self.mod.config_overrides("swingMs 50\nanimate no\n"),
+            {"swingMs": 50, "animate": False},
+        )
+
+    def test_install_config_refreshes_and_keeps_values(self):
         path = Path(self.tmp.name) / "config"
         os.environ["DASHBOTS_CONFIG"] = str(path)
         self.mod.install_config()
         self.assertEqual(path.read_text(encoding="utf-8"), self.mod.default_config_text())
-        path.write_text("swingMs 50\n", encoding="utf-8")
+
+        path.write_text(
+            "# place is center-right, center-left, or workspaces.\n"
+            "swingMs 800\n"
+            "animate off\n"
+            "place left\n"
+            "place workspaces\n"
+            "icons Primitives\n"
+            "icons -bogus\n"
+            "swingMs 0\n",
+            encoding="utf-8",
+        )
         self.mod.install_config()
-        self.assertEqual(path.read_text(encoding="utf-8"), "swingMs 50\n")
+        expected = self.mod.render_config({
+            "swingMs": 800,
+            "animate": False,
+            "place": "left",
+            "icons": "primitives",
+        })
+        self.assertEqual(path.read_text(encoding="utf-8"), expected)
+        self.assertIn("icons is a folder", expected)
+        self.assertNotIn("workspaces", expected)
+        stamp = path.stat().st_mtime_ns
+        self.mod.install_config()
+        self.assertEqual(path.read_text(encoding="utf-8"), expected)
+        self.assertEqual(path.stat().st_mtime_ns, stamp)
+
+        path.write_text("swingMs 900\n", encoding="utf-8")
+        self.mod.install_config()
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("swingMs 900\n", text)
+        self.assertIn("animate true\n", text)
+        self.assertIn("place center-right\n", text)
+        self.assertIn("icons botvaders\n", text)
+
+        stale = b"\xff\xfe swingMs 800\n"
+        path.write_bytes(stale)
+        self.mod.install_config()
+        self.assertEqual(path.read_bytes(), stale)
 
     def test_place_follows_config(self):
         shell = Path(self.tmp.name) / "shell.json"

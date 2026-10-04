@@ -18,7 +18,7 @@ From a cloned repo:
 ./bin/dashbots install
 ```
 
-Install links `~/.local/bin/dashbots` to this script. The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
+Install links `~/.local/bin/dashbots` to this script. The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Install writes that file. When the file is already there, install rewrites it from the current template and keeps values that are set: `swingMs`, `animate`, `place`, and `icons`. A value this version no longer accepts is left out. A key the file does not set takes the new default. Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
 
 Remove it with `dashbots uninstall`. That drops the hooks, the plugin, the bar slot, the menu row, the watcher, and the `~/.local/bin/dashbots` link. Session files already written are left in the state directory. The bar config is left too.
 
