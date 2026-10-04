@@ -2,10 +2,11 @@
 #
 # swingMs is one full swing, right then left, in milliseconds. Lower is faster.
 # animate is true or false. false keeps a working icon still.
-# place is center-right, center-left, or workspaces.
+# place is center-right, center-left, left, or right.
 #   center-right: just to the right of the weather.
 #   center-left: just to the left of the clock and weather.
-#   workspaces: just to the left of the workspace listing.
+#   left: just to the right of the workspace listing.
+#   right: just to the right of the tray.
 # icons is a folder under ~/.config/omarchy/plugins/dashbots/icons.
 #   botvaders is the default. primitives is the other shipped set.
 #   An SVG added to that folder becomes an icon. A new folder is a new set.

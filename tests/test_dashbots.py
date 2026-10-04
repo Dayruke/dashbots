@@ -1234,12 +1234,13 @@ class DashbotsTest(unittest.TestCase):
 
     def test_parse_config(self):
         parsed = self.mod.parse_config(
-            "# note\nswingMs 800\nanimate false\nplace workspaces\nplace sideways\n"
+            "# note\nswingMs 800\nanimate false\nplace left\nplace sideways\n"
             "icons primitives\nicons -bogus\n"
         )
         self.assertEqual(parsed["swingMs"], 800)
         self.assertFalse(parsed["animate"])
-        self.assertEqual(parsed["place"], "workspaces")
+        self.assertEqual(parsed["place"], "left")
+        self.assertEqual(self.mod.parse_config("place right\n")["place"], "right")
         self.assertEqual(parsed["icons"], "primitives")
         defaults = self.mod.parse_config("swingMs 0\nanimate maybe\n")
         self.assertEqual(defaults["swingMs"], 2000)
@@ -1295,14 +1296,26 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(self.mod.cmd_place(["place"]), 0)
         self.assertEqual(shell.read_text(encoding="utf-8"), parked)
 
-        config.write_text("place workspaces\n", encoding="utf-8")
+        config.write_text("place left\n", encoding="utf-8")
         self.assertEqual(self.mod.cmd_place(["place"]), 0)
         data = json.loads(shell.read_text(encoding="utf-8"))
         self.assertEqual(
             [entry["id"] for entry in data["bar"]["layout"]["left"]],
-            ["omarchy.menu", "dashbots", "omarchy.workspaces"],
+            ["omarchy.menu", "omarchy.workspaces", "dashbots"],
         )
         self.assertNotIn("dashbots", [entry["id"] for entry in data["bar"]["layout"]["center"]])
+
+        config.write_text("place right\n", encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        data = json.loads(shell.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [entry["id"] for entry in data["bar"]["layout"]["right"]],
+            ["omarchy.tray", "dashbots"],
+        )
+        self.assertNotIn("dashbots", [entry["id"] for entry in data["bar"]["layout"]["left"]])
+        parked = shell.read_text(encoding="utf-8")
+        self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        self.assertEqual(shell.read_text(encoding="utf-8"), parked)
 
         bare = {"bar": {"layout": {"left": [], "center": [{"id": "omarchy.indicators"}], "right": []}}}
         self.mod.move_slot(bare["bar"]["layout"], "center-left")

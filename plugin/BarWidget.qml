@@ -282,7 +282,8 @@ BarWidget {
         if (word === "true" || word === "yes" || word === "1" || word === "on") motion = true
         if (word === "false" || word === "no" || word === "0" || word === "off") motion = false
       } else if (key === "place") {
-        if (value === "center-right" || value === "center-left" || value === "workspaces") spot = value
+        if (value === "center-right" || value === "center-left" || value === "left" || value === "right")
+          spot = value
       } else if (key === "icons") {
         var token = value.toLowerCase()
         if (/^[a-z0-9][a-z0-9_-]{0,31}$/.test(token)) set = token

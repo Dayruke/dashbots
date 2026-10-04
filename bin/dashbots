@@ -150,12 +150,15 @@ def config_path():
 
 # center-left is just left of the clock and weather.
 # center-right is just right of the weather. That is the default.
-# workspaces is just left of the workspace listing.
+# left is just right of the workspace listing.
+# right is just right of the tray. The bar keeps the tray at the inner
+# edge of that side, so the marks sit beside the chevron.
 # Each value is section, anchors in preference order, and which side of the anchor.
 PLACES = {
     "center-left": ("center", ("omarchy.clock", "omarchy.weather"), "before"),
     "center-right": ("center", ("omarchy.weather", "omarchy.clock"), "after"),
-    "workspaces": ("left", ("omarchy.workspaces",), "before"),
+    "left": ("left", ("omarchy.workspaces",), "after"),
+    "right": ("right", ("omarchy.tray",), "after"),
 }
 
 
