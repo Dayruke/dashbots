@@ -1688,7 +1688,7 @@ def install_wrapper(harness, gemini=False, agy=False):
             "  return 1",
             "}",
             'if [ "$event" = "Stop" ]; then',
-            '  pid=$(agy_pid) || pid=""',
+            '  pid=${DASHBOTS_HOOK_PID:-$(agy_pid 2>/dev/null)}',
             '  if [ -n "$pid" ] && command -v setsid >/dev/null 2>&1; then',
             '    DASHBOTS_HOOK_ASSUME=1 DASHBOTS_HOOK_PID=$pid \\',
             '      setsid -f "$bin" hook --harness agy --event "$event" >/dev/null 2>&1',

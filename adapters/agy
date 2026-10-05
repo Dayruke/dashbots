@@ -24,7 +24,7 @@ if [ "$event" = "Stop" ]; then
   # A cancelled turn kills this process before a synchronous write lands,
   # and the mark stays on "thinking". Detach the write, then answer.
   # Anything other than "continue" lets the turn end.
-  pid=$(agy_pid) || pid=""
+  pid=${DASHBOTS_HOOK_PID:-$(agy_pid 2>/dev/null)}
   if [ -n "$pid" ] && command -v setsid >/dev/null 2>&1; then
     DASHBOTS_HOOK_ASSUME=1 DASHBOTS_HOOK_PID=$pid \
       setsid -f "$bin" hook --harness agy --event "$event" >/dev/null 2>&1

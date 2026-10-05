@@ -851,8 +851,16 @@ class DashbotsTest(unittest.TestCase):
         )
         self.assertEqual(stopped.returncode, 0)
         self.assertEqual(stopped.stdout, '{"decision":"allow"}\n')
-        self.assertEqual(self.record(f"agy-{os.getpid()}")["status"], "waiting")
-        self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "idle")
+        deadline = time.time() + 2
+        rec = None
+        while time.time() < deadline:
+            rec = self.record(f"agy-{os.getpid()}")
+            if rec and rec.get("status") == "waiting":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["status"], "waiting")
+        self.assertEqual(rec["activity"], "idle")
 
         quiet = subprocess.run(
             [str(adapter), "PreToolUse"],
