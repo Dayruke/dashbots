@@ -34,10 +34,11 @@ if [ "$event" = "Stop" ]; then
   printf '%s\n' '{"decision":"allow"}'
   exit 0
 fi
-"$bin" hook --harness agy --event "$event"
-# An empty object is a deny on current agy, with no reason. allow does not block.
+"$bin" hook --harness agy --event "$event" || true
+# {} denies on current agy. allow would authorize the tool. ask prompts
+# and still honors Always Allow. Printed even when the reporter fails.
 if [ "$event" = "PreToolUse" ]; then
-  printf '%s\n' '{"decision":"allow"}'
+  printf '%s\n' '{"decision":"ask"}'
 else
   printf '%s\n' '{}'
 fi

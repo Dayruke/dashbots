@@ -2,7 +2,8 @@
 """Dashbots reporter. One record shape, every harness.
 
 Hooks must exit 0 and stay quiet on stdout. The Gemini adapter prints {}
-itself. The Antigravity adapter prints {} too, and on Stop prints a decision
+itself. The Antigravity adapter prints {} too. On PreToolUse it prints ask,
+which prompts and does not authorize the tool. On Stop it prints a decision
 that lets the turn end. Debug goes to stderr only when DASHBOTS_DEBUG is set.
 """
 
@@ -1663,10 +1664,11 @@ def install_wrapper(harness, gemini=False, agy=False):
         f'bin="$HOME/.local/bin/dashbots"',
     ]
     if agy:
-        # PreToolUse stdout is a permission decision. Current agy treats an
-        # object with no decision as deny and shows an empty reason, so this
-        # hook answers allow. {} is not a pass-through. Stop must not print
-        # "continue", or the turn would not end.
+        # PreToolUse stdout is a permission decision. {} denies on current
+        # agy, and allow would authorize the tool. This hook answers ask,
+        # which prompts and still honors Always Allow. The answer is printed
+        # after the reporter, including when the reporter is off or fails.
+        # Stop must not print "continue", or the turn would not end.
         # A cancelled turn kills this process. Stop is detached so the
         # mark can leave "working" after that kill. The pid is captured
         # first: the detached process is reparented and cannot walk back
@@ -1698,9 +1700,9 @@ def install_wrapper(harness, gemini=False, agy=False):
             "  printf '%s\\n' '{\"decision\":\"allow\"}'",
             "  exit 0",
             "fi",
-            '"$bin" hook --harness agy --event "$event"',
+            '"$bin" hook --harness agy --event "$event" || true',
             'if [ "$event" = "PreToolUse" ]; then',
-            "  printf '%s\\n' '{\"decision\":\"allow\"}'",
+            "  printf '%s\\n' '{\"decision\":\"ask\"}'",
             "else",
             "  printf '%s\\n' '{}'",
             "fi",

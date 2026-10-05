@@ -874,10 +874,29 @@ class DashbotsTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(quiet.returncode, 0)
-        self.assertEqual(quiet.stdout, '{"decision":"allow"}\n')
+        self.assertEqual(quiet.stdout, '{"decision":"ask"}\n')
         self.assertEqual(self.record(f"agy-{os.getpid()}")["activity"], "needs a decision")
 
-    def test_agy_wrapper_allows_pretool(self):
+    def test_agy_pretool_asks_when_toggle_is_off(self):
+        self.flag.unlink()
+        adapter = Path(__file__).resolve().parents[1] / "adapters" / "agy"
+        env = os.environ.copy()
+        result = subprocess.run(
+            [str(adapter), "PreToolUse"],
+            input=json.dumps({
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "true"}},
+                "workspacePaths": ["/work/demo"],
+            }),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '{"decision":"ask"}\n')
+        self.assertIsNone(self.record(f"agy-{os.getpid()}"))
+
+    def test_agy_wrapper_asks_on_pretool(self):
         lib = Path(self.tmp.name) / "lib"
         original = self.mod.lib_dir
         self.mod.lib_dir = lambda: str(lib)
@@ -886,9 +905,40 @@ class DashbotsTest(unittest.TestCase):
         finally:
             self.mod.lib_dir = original
         text = (lib / "agy").read_text(encoding="utf-8")
-        self.assertIn('if [ "$event" = "PreToolUse" ]; then', text)
-        self.assertIn('{"decision":"allow"}', text)
-        self.assertNotIn("printf '%s\\n' '{}'\nexit 0", text)
+        stop_at = text.index('if [ "$event" = "Stop" ]')
+        hook_at = text.index('"$bin" hook --harness agy --event "$event" || true')
+        pre_at = text.index('if [ "$event" = "PreToolUse" ]')
+        self.assertLess(stop_at, hook_at)
+        self.assertLess(hook_at, pre_at)
+        stop_body = text[stop_at:hook_at]
+        pre_body = text[pre_at:]
+        self.assertIn('{"decision":"allow"}', stop_body)
+        self.assertNotIn('{"decision":"ask"}', stop_body)
+        self.assertIn('{"decision":"ask"}', pre_body)
+        self.assertNotIn('{"decision":"allow"}', pre_body)
+
+    def test_agy_wrapper_asks_when_reporter_missing(self):
+        lib = Path(self.tmp.name) / "lib"
+        original = self.mod.lib_dir
+        self.mod.lib_dir = lambda: str(lib)
+        try:
+            self.mod.install_wrapper("agy", agy=True)
+        finally:
+            self.mod.lib_dir = original
+        home = Path(self.tmp.name) / "empty-home"
+        home.mkdir()
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        result = subprocess.run(
+            [str(lib / "agy"), "PreToolUse"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '{"decision":"ask"}\n')
 
     def test_hook_applies_while_stdin_stays_open(self):
         script = Path(__file__).resolve().parents[1] / "bin" / "dashbots"
