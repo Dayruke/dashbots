@@ -7,7 +7,7 @@
 #   center-left: just to the left of the clock and weather.
 #   left: just to the right of the workspace listing.
 #   right: just to the right of the tray.
-# icons is a folder under ~/.config/omarchy/plugins/dashbots/icons.
+# icons is a folder under ~/.config/omarchy/plugins/io.github.dayruke.dashbots/plugin/icons.
 #   botvaders is the default. primitives is the other shipped set.
 #   An SVG added to that folder becomes an icon. A new folder is a new set.
 #   A new session picks one icon from that set. An icon already showing

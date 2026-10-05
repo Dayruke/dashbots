@@ -82,6 +82,8 @@ AGY_EVENTS = (
 )
 AGY_ASK_TOOLS = {"ask_question", "ask_permission"}
 AGY_HOOK_KEY = "dashbots"
+PLUGIN_ID = "io.github.dayruke.dashbots"
+LEGACY_PLUGIN_ID = "dashbots"
 
 
 def debug(msg):
@@ -131,7 +133,15 @@ def lib_dir():
 
 
 def plugin_dir():
-    return os.path.join(home(), ".config", "omarchy", "plugins", "dashbots")
+    return os.path.join(home(), ".config", "omarchy", "plugins", PLUGIN_ID)
+
+
+def legacy_plugin_dir():
+    return os.path.join(home(), ".config", "omarchy", "plugins", LEGACY_PLUGIN_ID)
+
+
+def same_dir(left, right):
+    return os.path.realpath(left) == os.path.realpath(right)
 
 
 def shell_json_path():
@@ -277,7 +287,7 @@ def resolve_icons_root(override, installed, shipped):
 def icons_root():
     return resolve_icons_root(
         os.environ.get("DASHBOTS_ICONS"),
-        os.path.join(plugin_dir(), "icons"),
+        os.path.join(plugin_dir(), "plugin", "icons"),
         shipped_icons_root(),
     )
 
@@ -1843,12 +1853,14 @@ def install_settings_hooks(path, harness, events, timeout, matchers=None):
     return True
 
 
-def copy_file(src, dst):
+def copy_file(src, dst, mode=0o644):
     if os.path.islink(dst):
         os.unlink(dst)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     shutil.copyfile(src, dst)
-    os.chmod(dst, 0o644)
+    os.chmod(dst, mode)
 
 
 def svg_files(root):
@@ -1954,13 +1966,112 @@ def sync_icons(source, destination):
             pass
 
 
-def copy_plugin():
-    source = os.path.join(repo_root(), "plugin")
-    destination = plugin_dir()
+CLONE_FILES = ("manifest.json", "README.md", "LICENSE", "preview.png", "config")
+CLONE_DIRS = ("bin", "adapters", "systemd")
+SKIP_COPY_DIRS = {".git", "tests", "__pycache__"}
+
+
+def sync_tree(source, destination):
+    """Mirror a support directory. Skip caches. A file that left the source is removed."""
+    if not os.path.isdir(source):
+        return
     os.makedirs(destination, exist_ok=True)
-    for name in ("manifest.json", "BarWidget.qml"):
-        copy_file(os.path.join(source, name), os.path.join(destination, name))
-    sync_icons(os.path.join(source, "icons"), os.path.join(destination, "icons"))
+    wanted = set()
+    for dirpath, dirnames, filenames in os.walk(source):
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in SKIP_COPY_DIRS and not name.startswith(".")
+        ]
+        rel_dir = os.path.relpath(dirpath, source)
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+            src = os.path.join(dirpath, filename)
+            if not os.path.isfile(src):
+                continue
+            rel = filename if rel_dir == "." else os.path.join(rel_dir, filename)
+            dest = within_dir(destination, rel)
+            if not dest:
+                continue
+            mode = 0o755 if os.access(src, os.X_OK) else 0o644
+            copy_file(src, dest, mode)
+            wanted.add(rel)
+    for dirpath, dirnames, filenames in os.walk(destination, topdown=False):
+        for filename in filenames:
+            full = os.path.join(dirpath, filename)
+            rel = os.path.relpath(full, destination)
+            if rel not in wanted:
+                try:
+                    os.remove(full)
+                except OSError:
+                    pass
+        if os.path.abspath(dirpath) == os.path.abspath(destination):
+            continue
+        try:
+            if not os.listdir(dirpath):
+                os.rmdir(dirpath)
+        except OSError:
+            pass
+
+
+def copy_plugin():
+    """Sync a dev checkout into the plugin dir in clone shape.
+
+    Running the binary from that directory skips the copy. Hooks, units,
+    the menu, and the bar slot still run.
+    """
+    source_root = repo_root()
+    destination = plugin_dir()
+    if same_dir(source_root, destination):
+        return
+    os.makedirs(destination, exist_ok=True)
+    for name in CLONE_FILES:
+        src = os.path.join(source_root, name)
+        if os.path.isfile(src):
+            copy_file(src, os.path.join(destination, name))
+    for name in CLONE_DIRS:
+        sync_tree(os.path.join(source_root, name), os.path.join(destination, name))
+    copy_file(
+        os.path.join(source_root, "plugin", "BarWidget.qml"),
+        os.path.join(destination, "plugin", "BarWidget.qml"),
+    )
+    sync_icons(
+        os.path.join(source_root, "plugin", "icons"),
+        os.path.join(destination, "plugin", "icons"),
+    )
+
+
+def keep_user_icons(legacy_icons, installed_icons):
+    """Copy SVGs the user added in the old flat icons directory."""
+    if not os.path.isdir(legacy_icons) or not os.path.isdir(installed_icons):
+        return
+    previous = read_shipped_manifest(os.path.join(legacy_icons, SHIPPED_MANIFEST))
+    if previous is None:
+        return
+    shipped = set(previous)
+    for rel, src in svg_files(legacy_icons).items():
+        if rel in shipped:
+            continue
+        dest = within_dir(installed_icons, rel)
+        if not dest or os.path.lexists(dest):
+            continue
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        copy_file(src, dest)
+
+
+def remove_legacy_plugin_dir():
+    legacy = legacy_plugin_dir()
+    if same_dir(legacy, plugin_dir()):
+        return
+    if not os.path.isdir(legacy):
+        return
+    keep_user_icons(
+        os.path.join(legacy, "icons"),
+        os.path.join(plugin_dir(), "plugin", "icons"),
+    )
+    shutil.rmtree(legacy)
 
 
 def legacy_icon_font_path():
@@ -2026,18 +2137,22 @@ def plugin_known():
         return False
     if not isinstance(data, list):
         return False
-    return any(isinstance(item, dict) and item.get("id") == "dashbots" for item in data)
+    return any(isinstance(item, dict) and item.get("id") == PLUGIN_ID for item in data)
 
 
-def bar_has_dashbots(config=None):
+def bar_has_id(plugin_id, config=None):
     if config is None:
         config = load_json_object(shell_json_path()) or {}
     layout = ((config.get("bar") or {}).get("layout") or {})
     for section in ("left", "center", "right"):
         for entry in layout.get(section) or []:
-            if isinstance(entry, dict) and entry.get("id") == "dashbots":
+            if isinstance(entry, dict) and entry.get("id") == plugin_id:
                 return True
     return False
+
+
+def bar_has_dashbots(config=None):
+    return bar_has_id(PLUGIN_ID, config)
 
 
 def bar_layout(config):
@@ -2077,7 +2192,7 @@ def placed_correctly(layout, place):
     for name in ("left", "center", "right"):
         entries = layout.get(name) or []
         for index, entry in enumerate(entries):
-            if isinstance(entry, dict) and entry.get("id") == "dashbots":
+            if isinstance(entry, dict) and entry.get("id") == PLUGIN_ID:
                 found.append((name, index))
     if len(found) != 1 or found[0][0] != section:
         return False
@@ -2102,12 +2217,12 @@ def move_slot(layout, place):
         entries = layout.get(name) or []
         layout[name] = [
             entry for entry in entries
-            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+            if not (isinstance(entry, dict) and entry.get("id") == PLUGIN_ID)
         ]
     entries = layout[section]
     anchor_name = chosen_anchor(entries, anchors)
     anchor = anchor_index(entries, (anchor_name,)) if anchor_name else None
-    slot = {"id": "dashbots"}
+    slot = {"id": PLUGIN_ID}
     if anchor is None:
         if side == "after":
             entries.append(slot)
@@ -2124,7 +2239,7 @@ def enable_command(layout, place):
     section, anchors, side = place_spec(place)
     entries = layout.get(section) or []
     chosen = chosen_anchor(entries, anchors)
-    command = ["omarchy", "plugin", "enable", "dashbots", "--section", section]
+    command = ["omarchy", "plugin", "enable", PLUGIN_ID, "--section", section]
     if chosen and side == "after":
         command.extend(["--after", chosen])
     elif chosen:
@@ -2132,7 +2247,7 @@ def enable_command(layout, place):
     else:
         index = sum(
             1 for entry in entries
-            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+            if not (isinstance(entry, dict) and entry.get("id") == PLUGIN_ID)
         )
         if side == "before":
             index = 0
@@ -2457,6 +2572,8 @@ def cmd_install(_argv=None):
     if validate.returncode != 0:
         sys.stderr.write(validate.stderr or validate.stdout or "plugin validate failed\n")
         return validate.returncode or 1
+    drop_legacy_bar_entry()
+    remove_legacy_plugin_dir()
     write_markers()
     touch_flag()
     enable_bar_slot()
@@ -2506,15 +2623,23 @@ def uninstall_settings(path, harness):
             pass
 
 
-def remove_bar_entry():
-    subprocess.run(
-        ["omarchy", "plugin", "disable", "dashbots"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if not bar_has_dashbots():
+def disable_plugin(plugin_id):
+    try:
+        subprocess.run(
+            ["omarchy", "plugin", "disable", plugin_id],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def strip_bar_ids(plugin_ids):
+    """Remove bar entries for these plugin ids. No-op when none of them are present."""
+    wanted = set(plugin_ids)
+    if not any(bar_has_id(plugin_id) for plugin_id in wanted):
         return
     path = shell_json_path()
     config = load_json_object(path)
@@ -2522,17 +2647,34 @@ def remove_bar_entry():
         print(f"could not remove the bar slot; {path} is not strict JSON", file=sys.stderr)
         return
     layout = ((config.get("bar") or {}).get("layout") or {})
+    changed = False
     for section in ("left", "center", "right"):
         entries = layout.get(section)
         if not isinstance(entries, list):
             continue
-        layout[section] = [
+        kept = [
             entry for entry in entries
-            if not (isinstance(entry, dict) and entry.get("id") == "dashbots")
+            if not (isinstance(entry, dict) and entry.get("id") in wanted)
         ]
+        if len(kept) != len(entries):
+            layout[section] = kept
+            changed = True
+    if not changed:
+        return
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     shutil.copy(path, f"{path}.bak.{stamp}")
     write_json(path, config)
+
+
+def drop_legacy_bar_entry():
+    disable_plugin(LEGACY_PLUGIN_ID)
+    strip_bar_ids((LEGACY_PLUGIN_ID,))
+
+
+def remove_bar_entry():
+    disable_plugin(PLUGIN_ID)
+    disable_plugin(LEGACY_PLUGIN_ID)
+    strip_bar_ids((PLUGIN_ID, LEGACY_PLUGIN_ID))
 
 
 def cmd_uninstall(_argv=None):
@@ -2563,8 +2705,6 @@ def cmd_uninstall(_argv=None):
             pass
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=20, check=False)
     remove_bar_entry()
-    if os.path.isdir(plugin_dir()):
-        shutil.rmtree(plugin_dir())
     try:
         subprocess.run(
             ["omarchy-shell", "shell", "rescanPlugins"],

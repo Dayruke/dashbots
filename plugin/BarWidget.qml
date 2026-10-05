@@ -51,7 +51,13 @@ BarWidget {
   readonly property string flagPath: home + "/.local/state/omarchy/toggles/dashbots"
   readonly property string sessionsDir: home + "/.local/state/dashbots/sessions"
   readonly property string binPath: home + "/.local/bin/dashbots"
-  readonly property string iconsDir: home + "/.config/omarchy/plugins/dashbots/icons"
+  // plugin/icons beside this file. test -d needs a path, so a file URL is decoded.
+  readonly property string iconsDir: {
+    var text = Qt.resolvedUrl("icons").toString()
+    if (text.startsWith("file://"))
+      text = text.substring(7)
+    return decodeURIComponent(text)
+  }
   readonly property string configPath: {
     var base = Quickshell.env("XDG_CONFIG_HOME")
     if (!base) base = root.home + "/.config"

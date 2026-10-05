@@ -1306,6 +1306,7 @@ class DashbotsTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), stale)
 
     def test_place_follows_config(self):
+        slot = self.mod.PLUGIN_ID
         shell = Path(self.tmp.name) / "shell.json"
         shell.write_text(json.dumps({
             "bar": {"layout": {
@@ -1314,7 +1315,7 @@ class DashbotsTest(unittest.TestCase):
                     {"id": "omarchy.keyboard-layout"},
                     {"id": "omarchy.clock", "format": "HH:mm"},
                     {"id": "omarchy.weather"},
-                    {"id": "dashbots"},
+                    {"id": slot},
                 ],
                 "right": [{"id": "omarchy.tray"}],
             }},
@@ -1328,7 +1329,7 @@ class DashbotsTest(unittest.TestCase):
         center = data["bar"]["layout"]["center"]
         self.assertEqual(
             [entry["id"] for entry in center],
-            ["omarchy.keyboard-layout", "dashbots", "omarchy.clock", "omarchy.weather"],
+            ["omarchy.keyboard-layout", slot, "omarchy.clock", "omarchy.weather"],
         )
         self.assertEqual(center[2]["format"], "HH:mm")
 
@@ -1338,7 +1339,7 @@ class DashbotsTest(unittest.TestCase):
         center = data["bar"]["layout"]["center"]
         self.assertEqual(
             [entry["id"] for entry in center],
-            ["omarchy.keyboard-layout", "omarchy.clock", "omarchy.weather", "dashbots"],
+            ["omarchy.keyboard-layout", "omarchy.clock", "omarchy.weather", slot],
         )
         parked = shell.read_text(encoding="utf-8")
         self.assertEqual(self.mod.cmd_place(["place"]), 0)
@@ -1349,18 +1350,18 @@ class DashbotsTest(unittest.TestCase):
         data = json.loads(shell.read_text(encoding="utf-8"))
         self.assertEqual(
             [entry["id"] for entry in data["bar"]["layout"]["left"]],
-            ["omarchy.menu", "omarchy.workspaces", "dashbots"],
+            ["omarchy.menu", "omarchy.workspaces", slot],
         )
-        self.assertNotIn("dashbots", [entry["id"] for entry in data["bar"]["layout"]["center"]])
+        self.assertNotIn(slot, [entry["id"] for entry in data["bar"]["layout"]["center"]])
 
         config.write_text("place right\n", encoding="utf-8")
         self.assertEqual(self.mod.cmd_place(["place"]), 0)
         data = json.loads(shell.read_text(encoding="utf-8"))
         self.assertEqual(
             [entry["id"] for entry in data["bar"]["layout"]["right"]],
-            ["omarchy.tray", "dashbots"],
+            ["omarchy.tray", slot],
         )
-        self.assertNotIn("dashbots", [entry["id"] for entry in data["bar"]["layout"]["left"]])
+        self.assertNotIn(slot, [entry["id"] for entry in data["bar"]["layout"]["left"]])
         parked = shell.read_text(encoding="utf-8")
         self.assertEqual(self.mod.cmd_place(["place"]), 0)
         self.assertEqual(shell.read_text(encoding="utf-8"), parked)
@@ -1369,13 +1370,124 @@ class DashbotsTest(unittest.TestCase):
         self.mod.move_slot(bare["bar"]["layout"], "center-left")
         self.assertEqual(
             [entry["id"] for entry in bare["bar"]["layout"]["center"]],
-            ["dashbots", "omarchy.indicators"],
+            [slot, "omarchy.indicators"],
         )
         self.mod.move_slot(bare["bar"]["layout"], "center-right")
         self.assertEqual(
             [entry["id"] for entry in bare["bar"]["layout"]["center"]],
-            ["omarchy.indicators", "dashbots"],
+            ["omarchy.indicators", slot],
         )
+
+    def test_strip_bar_ids_drops_the_legacy_slot(self):
+        slot = self.mod.PLUGIN_ID
+        legacy = self.mod.LEGACY_PLUGIN_ID
+        shell = Path(self.tmp.name) / "shell.json"
+        shell.write_text(json.dumps({
+            "bar": {"layout": {
+                "left": [],
+                "center": [{"id": legacy}, {"id": "omarchy.weather"}, {"id": slot}],
+                "right": [],
+            }},
+        }), encoding="utf-8")
+        os.environ["DASHBOTS_SHELL_FILE"] = str(shell)
+        self.mod.strip_bar_ids((legacy,))
+        center = json.loads(shell.read_text(encoding="utf-8"))["bar"]["layout"]["center"]
+        self.assertEqual([entry["id"] for entry in center], ["omarchy.weather", slot])
+        self.mod.strip_bar_ids((slot, legacy))
+        center = json.loads(shell.read_text(encoding="utf-8"))["bar"]["layout"]["center"]
+        self.assertEqual([entry["id"] for entry in center], ["omarchy.weather"])
+
+    def test_enable_command_uses_the_plugin_id(self):
+        command = self.mod.enable_command({"center": [{"id": "omarchy.weather"}]}, "center-right")
+        self.assertEqual(command[3], self.mod.PLUGIN_ID)
+        self.assertNotIn(self.mod.LEGACY_PLUGIN_ID, command)
+
+    def test_copy_plugin_writes_clone_shape(self):
+        src = Path(self.tmp.name) / "repo"
+        dst = Path(self.tmp.name) / "installed"
+        (src / "plugin" / "icons" / "botvaders").mkdir(parents=True)
+        (src / "plugin" / "icons" / "botvaders" / "imp.svg").write_text("<svg></svg>", encoding="utf-8")
+        (src / "plugin" / "BarWidget.qml").write_text("BarWidget {}\n", encoding="utf-8")
+        (src / "bin").mkdir()
+        script = src / "bin" / "dashbots"
+        script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        script.chmod(0o755)
+        (src / "manifest.json").write_text("{}\n", encoding="utf-8")
+        (src / "README.md").write_text("read\n", encoding="utf-8")
+        (src / "LICENSE").write_text("mit\n", encoding="utf-8")
+        (src / "preview.png").write_bytes(b"png")
+        (src / "config").write_text("swingMs 2000\n", encoding="utf-8")
+        (src / "adapters").mkdir()
+        (src / "adapters" / "grok").write_text("#!/bin/sh\n", encoding="utf-8")
+        (src / "systemd").mkdir()
+        (src / "systemd" / "dashbots.service").write_text("[Unit]\n", encoding="utf-8")
+        (src / "tests").mkdir()
+        (src / "tests" / "nope.py").write_text("x\n", encoding="utf-8")
+        (src / ".git").mkdir()
+        (src / ".git" / "config").write_text("x\n", encoding="utf-8")
+        (src / "bin" / "__pycache__").mkdir()
+        (src / "bin" / "__pycache__" / "dashbots.pyc").write_bytes(b"pyc")
+        real_root = self.mod.repo_root
+        real_plugin = self.mod.plugin_dir
+        self.mod.repo_root = lambda: str(src)
+        self.mod.plugin_dir = lambda: str(dst)
+        try:
+            self.mod.copy_plugin()
+            self.assertTrue((dst / "manifest.json").is_file())
+            self.assertTrue((dst / "plugin" / "BarWidget.qml").is_file())
+            self.assertTrue((dst / "plugin" / "icons" / "botvaders" / "imp.svg").is_file())
+            self.assertTrue((dst / "config").is_file())
+            self.assertFalse((dst / "BarWidget.qml").exists())
+            self.assertFalse((dst / "icons").exists())
+            self.assertFalse((dst / "tests").exists())
+            self.assertFalse((dst / ".git").exists())
+            self.assertFalse((dst / "bin" / "__pycache__").exists())
+            self.assertTrue(os.access(dst / "bin" / "dashbots", os.X_OK))
+            (dst / "plugin" / "icons" / "botvaders" / "mine.svg").write_text("<svg>mine</svg>", encoding="utf-8")
+            self.mod.copy_plugin()
+            self.assertEqual(
+                (dst / "plugin" / "icons" / "botvaders" / "mine.svg").read_text(encoding="utf-8"),
+                "<svg>mine</svg>",
+            )
+            (dst / "README.md").write_text("local edit\n", encoding="utf-8")
+            self.mod.repo_root = lambda: str(dst)
+            self.mod.copy_plugin()
+            self.assertEqual((dst / "README.md").read_text(encoding="utf-8"), "local edit\n")
+        finally:
+            self.mod.repo_root = real_root
+            self.mod.plugin_dir = real_plugin
+
+    def test_keep_user_icons_copies_unshipped_svgs(self):
+        legacy = Path(self.tmp.name) / "legacy"
+        installed = Path(self.tmp.name) / "installed"
+        (legacy / "botvaders").mkdir(parents=True)
+        (legacy / "botvaders" / "imp.svg").write_text("<svg>imp</svg>", encoding="utf-8")
+        (legacy / "cats").mkdir()
+        (legacy / "cats" / "worm.svg").write_text("<svg>worm</svg>", encoding="utf-8")
+        (legacy / ".shipped").write_text("botvaders/imp.svg\n", encoding="utf-8")
+        (installed / "botvaders").mkdir(parents=True)
+        self.mod.keep_user_icons(str(legacy), str(installed))
+        self.assertFalse((installed / "botvaders" / "imp.svg").exists())
+        self.assertEqual((installed / "cats" / "worm.svg").read_text(encoding="utf-8"), "<svg>worm</svg>")
+
+    def test_remove_legacy_plugin_dir_leaves_the_new_tree(self):
+        legacy = Path(self.tmp.name) / "dashbots"
+        installed = Path(self.tmp.name) / "io.github.dayruke.dashbots"
+        (legacy / "icons").mkdir(parents=True)
+        (legacy / "icons" / ".shipped").write_text("", encoding="utf-8")
+        (installed / "plugin" / "icons").mkdir(parents=True)
+        (installed / "manifest.json").write_text("{}\n", encoding="utf-8")
+        real_legacy = self.mod.legacy_plugin_dir
+        real_plugin = self.mod.plugin_dir
+        self.mod.legacy_plugin_dir = lambda: str(legacy)
+        self.mod.plugin_dir = lambda: str(installed)
+        try:
+            self.mod.remove_legacy_plugin_dir()
+        finally:
+            self.mod.legacy_plugin_dir = real_legacy
+            self.mod.plugin_dir = real_plugin
+        self.assertFalse(legacy.exists())
+        self.assertTrue((installed / "manifest.json").is_file())
 
 
 if __name__ == "__main__":

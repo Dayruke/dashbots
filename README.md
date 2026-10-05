@@ -14,15 +14,27 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 
 ## Install
 
-From a cloned repo:
-
 ```sh
-./bin/dashbots install
+omarchy plugin add https://github.com/Dayruke/dashbots.git --enable
+~/.config/omarchy/plugins/io.github.dayruke.dashbots/bin/dashbots install
 ```
 
-Install links `~/.local/bin/dashbots` to this script. The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Install writes that file. When the file is already there, install rewrites it from the current template and keeps values that are set: `swingMs`, `animate`, `place`, and `icons`. A value this version no longer accepts is left out. A key the file does not set takes the new default. Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
+`omarchy plugin add` clones the repo into `~/.config/omarchy/plugins/io.github.dayruke.dashbots/`. `dashbots install` links `~/.local/bin/dashbots` and writes the harness hooks, the user units, the menu row, and the bar slot. Loading the widget does not write those files.
 
-Remove it with `dashbots uninstall`. That drops the hooks, the plugin, the bar slot, the menu row, the watcher, and the `~/.local/bin/dashbots` link. Session files already written are left in the state directory. The bar config is left too.
+The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Install writes that file. When the file is already there, install rewrites it from the current template and keeps values that are set: `swingMs`, `animate`, `place`, and `icons`. A value this version no longer accepts is left out. A key the file does not set takes the new default. Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
+
+Remove it in this order:
+
+```sh
+dashbots uninstall
+omarchy plugin remove io.github.dayruke.dashbots
+```
+
+`dashbots uninstall` drops the hooks, the bar slot, the menu row, the watcher, and the `~/.local/bin/dashbots` link. Session files and the bar config stay. `omarchy plugin remove` deletes the checkout.
+
+## Dependencies
+
+Python 3 standard library, `inotifywait` (inotify-tools), Omarchy Quattro (`omarchy`, `omarchy-shell`), systemd `--user`, and Hyprland for focus. The plugin installs no extra packages.
 
 
 ## What you see
@@ -45,7 +57,7 @@ Each mark is a white SVG. The bar mixes that white with a theme color for all th
 
 A new session picks one icon at random from the set in the bar config. `icons botvaders` is the default. `icons primitives` is the other shipped set. An icon already on the bar is skipped until every icon in that set is in use. Saving a different set moves the marks that are already up onto it, when that folder is already there. Awake eyes are open holes with a small shine. Asleep eyes are dashes.
 
-The set is the SVG files in `~/.config/omarchy/plugins/dashbots/icons/<name>/`. The `icons` value is the folder name, so `icons flowers` uses `flowers/`. Each icon is `{id}.svg`. `{id}` is lowercase letters, digits, `_`, or `-`, up to 32 characters. `{id}-asleep.svg` is the dash-eyed face; without that file the awake face stays up. Install refreshes the shipped files and leaves files you added in that directory. A folder added under `plugin/icons/` in the repo is copied on install, and a later install drops it if the repo no longer has it. Uninstall removes the plugin folder, added icons included.
+The set is the SVG files in `~/.config/omarchy/plugins/io.github.dayruke.dashbots/plugin/icons/<name>/`. The `icons` value is the folder name, so `icons flowers` uses `flowers/`. Each icon is `{id}.svg`. `{id}` is lowercase letters, digits, `_`, or `-`, up to 32 characters. `{id}-asleep.svg` is the dash-eyed face; without that file the awake face stays up. Install refreshes the shipped files and leaves files you added in that directory. A folder added under `plugin/icons/` in the repo is still a set. A later install drops a shipped file the repo no longer has. Added icons stay until `omarchy plugin remove` deletes the checkout.
 
 | Eyes | What it means |
 | --- | --- |
