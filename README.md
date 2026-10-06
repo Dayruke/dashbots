@@ -10,8 +10,6 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 
 ![Dashbots bar screenshot](images/dashbots.png)
 
-[![5 Minute Tour of Dashbots](https://img.youtube.com/vi/sG-t8i7nHnc/maxresdefault.jpg)](https://www.youtube.com/watch?v=sG-t8i7nHnc)
-
 **Lightweight**. Runs at about 14 MB and 0.3% of one core.
 
 ## Install
@@ -40,6 +38,10 @@ Python 3 standard library, `inotifywait` (inotify-tools), Omarchy Quattro (`omar
 
 
 ## What you see
+
+<a href="https://www.youtube.com/watch?v=sG-t8i7nHnc"><img src="images/tour-thumb.jpg" alt="5 minute tour of Dashbots (YouTube)" width="480"></a>
+
+▶ [5 minute tour on YouTube](https://www.youtube.com/watch?v=sG-t8i7nHnc)
 
 While Dashbots is on, the widget slot is always there: one icon is added per live session, or a single `_` when none are alive—so you know that it's consuming (minimal!) system resources.
 
