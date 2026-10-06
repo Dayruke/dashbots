@@ -61,6 +61,9 @@ GROK_EVENTS = (
     "Notification",
     "SessionEnd",
 )
+# Claude ignores StopCancelled and warns on every launch if it is listed.
+# Grok still emits that event, so the Grok hook file keeps it.
+CLAUDE_EVENTS = tuple(event for event in GROK_EVENTS if event != "StopCancelled")
 GEMINI_EVENTS = (
     "SessionStart",
     "BeforeAgent",
@@ -682,7 +685,33 @@ def iter_pids():
             yield int(name)
 
 
+def ensure_hypr_env():
+    """Point hyprctl at the running compositor.
+
+    A user service can start before Hyprland's instance signature is in
+    the systemd user environment. hyprctl then sees no clients, and a
+    mark never learns its window. One instance directory under the
+    runtime hypr folder is that signature.
+    """
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or os.path.join("/run/user", str(os.getuid()))
+    hypr_dir = os.path.join(runtime, "hypr")
+    try:
+        names = [
+            name for name in os.listdir(hypr_dir)
+            if name and not name.startswith(".")
+            and os.path.isdir(os.path.join(hypr_dir, name))
+        ]
+    except OSError:
+        return
+    if len(names) != 1:
+        return
+    os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = names[0]
+
+
 def hypr_clients():
+    ensure_hypr_env()
     try:
         result = subprocess.run(
             ["hyprctl", "clients", "-j"],
@@ -1124,6 +1153,7 @@ def live_records():
 
 
 def hypr_text(args):
+    ensure_hypr_env()
     try:
         result = subprocess.run(
             args,
@@ -1621,6 +1651,18 @@ def merge_hooks(settings, harness, events, timeout, matchers=None):
         groups = [group for group in groups if not is_our_group(group, harness)]
         groups.append(hook_group(harness, timeout, matchers.get(event)))
         hooks[event] = groups
+    # Drop our groups for events this harness no longer installs. A stale
+    # StopCancelled entry in Claude's settings is otherwise left in place
+    # and warned on at every launch.
+    wanted = set(events)
+    for event, groups in list(hooks.items()):
+        if event in wanted or not isinstance(groups, list):
+            continue
+        kept = [group for group in groups if not is_our_group(group, harness)]
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
     settings["hooks"] = hooks
     return settings
 
@@ -2551,7 +2593,7 @@ def cmd_install(_argv=None):
     install_settings_hooks(
         os.path.join(home(), ".claude", "settings.json"),
         "claude",
-        GROK_EVENTS,
+        CLAUDE_EVENTS,
         5,
         {"Notification": "idle_prompt|permission_prompt|elicitation_dialog"},
     )

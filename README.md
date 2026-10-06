@@ -10,6 +10,8 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 
 ![Dashbots bar screenshot](images/dashbots.png)
 
+[![5 Minute Tour of Dashbots](https://img.youtube.com/vi/sG-t8i7nHnc/maxresdefault.jpg)](https://www.youtube.com/watch?v=sG-t8i7nHnc)
+
 **Lightweight**. Runs at about 14 MB and 0.3% of one core.
 
 ## Install

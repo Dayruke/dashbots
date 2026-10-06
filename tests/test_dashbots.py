@@ -1155,6 +1155,81 @@ class DashbotsTest(unittest.TestCase):
             for name, value in originals.items():
                 setattr(self.mod, name, value)
 
+    def test_window_for_uses_an_ancestor(self):
+        original = self.mod.ppid_of
+        self.mod.ppid_of = lambda pid: {50: 40, 40: 1}.get(pid, 0)
+        try:
+            found = self.mod.window_for(50, [{"pid": 40, "address": "0xabc"}])
+        finally:
+            self.mod.ppid_of = original
+        self.assertEqual(found, "0xabc")
+
+    def test_hypr_signature_comes_from_the_runtime_dir(self):
+        runtime = Path(self.tmp.name) / "run"
+        (runtime / "hypr" / "abc_signature").mkdir(parents=True)
+        (runtime / "hypr" / "not-a-dir").write_text("x", encoding="utf-8")
+        saved = {
+            key: os.environ.get(key)
+            for key in ("HYPRLAND_INSTANCE_SIGNATURE", "XDG_RUNTIME_DIR")
+        }
+        os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        os.environ["XDG_RUNTIME_DIR"] = str(runtime)
+        try:
+            self.mod.ensure_hypr_env()
+            self.assertEqual(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"), "abc_signature")
+            os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+            (runtime / "hypr" / "other").mkdir()
+            self.mod.ensure_hypr_env()
+            self.assertIsNone(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_claude_install_drops_stop_cancelled(self):
+        path = Path(self.tmp.name) / "settings.json"
+        path.write_text(json.dumps({
+            "theme": "auto",
+            "hooks": {
+                "StopCancelled": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/someone/.local/lib/dashbots/claude",
+                        "timeout": 5,
+                    }],
+                }],
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/someone/else",
+                        "timeout": 5,
+                    }],
+                }],
+            },
+        }), encoding="utf-8")
+        self.assertNotIn("StopCancelled", self.mod.CLAUDE_EVENTS)
+        self.assertIn("StopCancelled", self.mod.GROK_EVENTS)
+        self.assertTrue(self.mod.install_settings_hooks(
+            str(path),
+            "claude",
+            self.mod.CLAUDE_EVENTS,
+            5,
+            {"Notification": "idle_prompt|permission_prompt|elicitation_dialog"},
+        ))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["theme"], "auto")
+        self.assertNotIn("StopCancelled", data["hooks"])
+        commands = [
+            hook["command"]
+            for group in data["hooks"]["Stop"]
+            for hook in group["hooks"]
+        ]
+        self.assertIn("/someone/else", commands)
+        self.assertTrue(any(command.endswith("/dashbots/claude") for command in commands))
+        self.assertIn("StopFailure", data["hooks"])
+
     def test_agy_hook_merge_keeps_other_hooks(self):
         path = Path(self.tmp.name) / "hooks.json"
         path.write_text(json.dumps({
