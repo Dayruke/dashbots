@@ -1337,9 +1337,13 @@ def has_marker(harness):
 
 
 def _refresh_presence(record, cwd, window):
-    """Update the window and directory. Leave status and activity alone."""
+    """Update the window and directory. Leave status and activity alone.
+
+    A failed window lookup keeps the address a hook already wrote.
+    """
     title = title_of(cwd, record.get("harness"))
     cwd = cwd or ""
+    window = window or str(record.get("window") or "")
     if record.get("cwd") == cwd and record.get("title") == title and record.get("window") == window:
         return
     updated = dict(record)
@@ -2378,6 +2382,12 @@ def install_units():
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=20)
     subprocess.run(
         ["systemctl", "--user", "enable", "--now", "dashbots.path"],
+        check=False,
+        timeout=20,
+    )
+    # A watcher already running keeps the old code until it restarts.
+    subprocess.run(
+        ["systemctl", "--user", "try-restart", "dashbots.service"],
         check=False,
         timeout=20,
     )

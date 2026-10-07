@@ -992,6 +992,29 @@ class DashbotsTest(unittest.TestCase):
         finally:
             self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of = originals
 
+    def test_agy_presence_keeps_a_hook_window(self):
+        pid = os.getpid()
+        self.mod.write_record({
+            "id": f"agy-{pid}",
+            "harness": "agy",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "waiting",
+            "activity": "idle",
+            "window": "0xabc",
+            "source": "hook",
+        })
+        originals = (self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of)
+        self.mod.iter_pids = lambda: [pid]
+        self.mod.harness_of = lambda candidate: "agy" if candidate == pid else None
+        self.mod.cwd_of = lambda _candidate: "/work/demo"
+        try:
+            self.assertEqual(self.mod.cmd_scan(["scan"]), 0)
+        finally:
+            self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of = originals
+        self.assertEqual(self.record(f"agy-{pid}")["window"], "0xabc")
+
     def test_agy_gc_keeps_presence_until_a_hook_exists(self):
         pid = os.getpid()
         marker = Path(self.mod.adapters_dir())
