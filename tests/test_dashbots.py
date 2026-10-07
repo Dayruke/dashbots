@@ -335,7 +335,7 @@ class DashbotsTest(unittest.TestCase):
                 "turn": "",
             })
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+            self.assertEqual([item["id"] for item in listed], ["older", "newer"])
         finally:
             self.mod.pid_alive = real_alive
 
@@ -377,7 +377,7 @@ class DashbotsTest(unittest.TestCase):
             older["activity"] = "working"
             self.mod.write_record(older)
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+            self.assertEqual([item["id"] for item in listed], ["older", "newer"])
             stored = self.record("older")
             self.assertEqual(stored["created_at"], "2026-01-01T00:00:01Z")
             self.assertEqual(stored["updated_at"], "2026-01-01T00:00:03Z")
@@ -576,7 +576,7 @@ class DashbotsTest(unittest.TestCase):
                 self.assertEqual(item["status"], before[index]["status"])
                 self.assertEqual(item["id"], f"s{index}")
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["s1", "s0"])
+            self.assertEqual([item["id"] for item in listed], ["s0", "s1"])
             kept = [item["body"] for item in after]
             self.assertEqual(self.mod.cmd_list(["list"]), 0)
             self.assertEqual([self.record(f"s{index}")["body"] for index in range(2)], kept)

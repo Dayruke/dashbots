@@ -1144,11 +1144,9 @@ def live_records():
     for record in iter_records():
         if pid_alive(record.get("pid")):
             found.append(record)
-    # Newest session first. A status change does not change this order.
-    found.sort(
-        key=lambda item: (slot_stamp(item), str(item.get("id") or "")),
-        reverse=True,
-    )
+    # Oldest session first, so a new mark is added on the right. A status
+    # change does not change this order.
+    found.sort(key=lambda item: (slot_stamp(item), str(item.get("id") or "")))
     return found
 
 
