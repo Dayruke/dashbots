@@ -224,6 +224,33 @@ class DashbotsTest(unittest.TestCase):
         })
         self.assertIsNone(self.record("child"))
 
+    def test_daemon_hosted_claude_is_ignored(self):
+        me = os.getpid()
+        parents = {me: 40, 40: 30, 30: 1}
+        args = {40: ["claude", "bg-pty-host", "--bg-pty-host", "/tmp/x.sock"], 30: ["claude", "daemon", "run"]}
+        originals = {"ppid_of": self.mod.ppid_of, "cmdline": self.mod.cmdline}
+        self.mod.ppid_of = lambda pid: parents.get(pid, 0)
+        self.mod.cmdline = lambda pid: args.get(pid, [])
+        try:
+            self.hook({"hook_event_name": "SessionStart", "session_id": "bg", "cwd": "/work/demo"}, "claude")
+            self.assertIsNone(self.record("bg"))
+            self.hook({"hook_event_name": "SessionStart", "sessionId": "grok1", "cwd": "/work/demo"})
+            self.assertIsNotNone(self.record("grok1"))
+            self.mod.write_record({
+                "id": "old-bg", "harness": "claude", "pid": me, "cwd": "/work/demo",
+                "title": "demo", "status": "alive", "window": "0xabc", "activity": "started",
+                "source": "hook", "turn": "",
+            })
+            self.mod.cmd_gc()
+            self.assertIsNone(self.record("old-bg"))
+            self.assertIsNotNone(self.record("grok1"))
+            parents[me] = 1
+            self.hook({"hook_event_name": "SessionStart", "session_id": "fg", "cwd": "/work/demo"}, "claude")
+            self.assertIsNotNone(self.record("fg"))
+        finally:
+            for name, value in originals.items():
+                setattr(self.mod, name, value)
+
     def test_wrong_harness_noop(self):
         os.environ.pop("DASHBOTS_HOOK_ASSUME", None)
         self.hook({"hook_event_name": "SessionStart", "sessionId": "nope", "cwd": "/tmp"}, "claude")
