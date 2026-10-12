@@ -15,11 +15,21 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/Dayruke/dashbots/main/install.sh | bash
+```
+
+[install.sh](install.sh) does both steps below. No extra packages. Nothing runs as root. A pipe has no terminal, so the script passes `--yes` and Omarchy does not stop to confirm.
+
+By hand, which is also what the plugin store documents:
+
+```sh
 omarchy plugin add https://github.com/Dayruke/dashbots.git --enable
 ~/.config/omarchy/plugins/io.github.dayruke.dashbots/bin/dashbots install
 ```
 
 `omarchy plugin add` clones the repo into `~/.config/omarchy/plugins/io.github.dayruke.dashbots/`. `dashbots install` links `~/.local/bin/dashbots` and writes the harness hooks, the user units, the menu row, and the bar slot. Loading the widget does not write those files.
+
+Run the one-liner again to update. When that directory is a git checkout, the script fast-forwards it, then runs `dashbots install`. When it is not a git checkout, the files stay and `dashbots install` still runs. From a clone of this repo, `./install.sh` is the same installer and keeps Omarchy's confirm prompt.
 
 The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Install writes that file. When the file is already there, install rewrites it from the current template and keeps values that are set: `swingMs`, `animate`, `place`, and `icons`. A value this version no longer accepts is left out. A key the file does not set takes the new default. Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
 
@@ -96,7 +106,7 @@ Each agent session is one JSON record at `$XDG_STATE_HOME/dashbots/sessions/<id>
 
 A process scan covers harnesses that have no adapter yet. It may only write `alive`, plus the working directory and the terminal window. Codex and OpenCode are scan-only. Antigravity is the exception that still gets a scan mark: one still mark per `agy` process until a hook writes, and the scan does not change status after that. The hook file is `~/.gemini/config/hooks.json`. One named hook, `dashbots`, is merged into it. `~/.gemini/antigravity-cli/` is left alone. An Antigravity mark is one per process (`agy-<pid>`), and Stop does not remove it. Cancelling a turn writes that stop, so the mark leaves working. The mark goes away when the process exits.
 
-The bar widget watches `~/.local/state/dashbots/sessions` with one `inotifywait`, and it watches the toggle flag. A record is replaced atomically. About 100 ms after the writes settle, that change runs `dashbots list`. `list` prints a JSON array of records whose process is still alive, newest session first. That order is when the session first appeared. Going idle, working, or waiting does not move the mark. A session that starts later is added at the front. Dead pids stay on disk until `dashbots gc` drops them, and removing the file clears the mark. The watcher runs gc, and the scan, while Dashbots is on.
+The bar widget watches `~/.local/state/dashbots/sessions` with one `inotifywait`, and it watches the toggle flag. A record is replaced atomically. About 100 ms after the writes settle, that change runs `dashbots list`. `list` prints a JSON array of records whose process is still alive, oldest session first. That order is when the session first appeared. Going idle, working, or waiting does not move the mark. A session that starts later is added on the right. Dead pids stay on disk until `dashbots gc` drops them, and removing the file clears the mark. The watcher runs gc, and the scan, while Dashbots is on. A Claude session that the Claude daemon runs in the background (under `claude daemon` or `claude bg-pty-host`) has no terminal to focus, so it gets no mark, and gc drops one it already has.
 
 
 ## Not (yet?) implemented

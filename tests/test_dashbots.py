@@ -224,6 +224,33 @@ class DashbotsTest(unittest.TestCase):
         })
         self.assertIsNone(self.record("child"))
 
+    def test_daemon_hosted_claude_is_ignored(self):
+        me = os.getpid()
+        parents = {me: 40, 40: 30, 30: 1}
+        args = {40: ["claude", "bg-pty-host", "--bg-pty-host", "/tmp/x.sock"], 30: ["claude", "daemon", "run"]}
+        originals = {"ppid_of": self.mod.ppid_of, "cmdline": self.mod.cmdline}
+        self.mod.ppid_of = lambda pid: parents.get(pid, 0)
+        self.mod.cmdline = lambda pid: args.get(pid, [])
+        try:
+            self.hook({"hook_event_name": "SessionStart", "session_id": "bg", "cwd": "/work/demo"}, "claude")
+            self.assertIsNone(self.record("bg"))
+            self.hook({"hook_event_name": "SessionStart", "sessionId": "grok1", "cwd": "/work/demo"})
+            self.assertIsNotNone(self.record("grok1"))
+            self.mod.write_record({
+                "id": "old-bg", "harness": "claude", "pid": me, "cwd": "/work/demo",
+                "title": "demo", "status": "alive", "window": "0xabc", "activity": "started",
+                "source": "hook", "turn": "",
+            })
+            self.mod.cmd_gc()
+            self.assertIsNone(self.record("old-bg"))
+            self.assertIsNotNone(self.record("grok1"))
+            parents[me] = 1
+            self.hook({"hook_event_name": "SessionStart", "session_id": "fg", "cwd": "/work/demo"}, "claude")
+            self.assertIsNotNone(self.record("fg"))
+        finally:
+            for name, value in originals.items():
+                setattr(self.mod, name, value)
+
     def test_wrong_harness_noop(self):
         os.environ.pop("DASHBOTS_HOOK_ASSUME", None)
         self.hook({"hook_event_name": "SessionStart", "sessionId": "nope", "cwd": "/tmp"}, "claude")
@@ -335,7 +362,7 @@ class DashbotsTest(unittest.TestCase):
                 "turn": "",
             })
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+            self.assertEqual([item["id"] for item in listed], ["older", "newer"])
         finally:
             self.mod.pid_alive = real_alive
 
@@ -377,7 +404,7 @@ class DashbotsTest(unittest.TestCase):
             older["activity"] = "working"
             self.mod.write_record(older)
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["newer", "older"])
+            self.assertEqual([item["id"] for item in listed], ["older", "newer"])
             stored = self.record("older")
             self.assertEqual(stored["created_at"], "2026-01-01T00:00:01Z")
             self.assertEqual(stored["updated_at"], "2026-01-01T00:00:03Z")
@@ -576,7 +603,7 @@ class DashbotsTest(unittest.TestCase):
                 self.assertEqual(item["status"], before[index]["status"])
                 self.assertEqual(item["id"], f"s{index}")
             listed = self.mod.live_records()
-            self.assertEqual([item["id"] for item in listed], ["s1", "s0"])
+            self.assertEqual([item["id"] for item in listed], ["s0", "s1"])
             kept = [item["body"] for item in after]
             self.assertEqual(self.mod.cmd_list(["list"]), 0)
             self.assertEqual([self.record(f"s{index}")["body"] for index in range(2)], kept)
@@ -991,6 +1018,29 @@ class DashbotsTest(unittest.TestCase):
             self.assertNotEqual(again["updated_at"], "2099-01-01T00:00:00Z")
         finally:
             self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of = originals
+
+    def test_agy_presence_keeps_a_hook_window(self):
+        pid = os.getpid()
+        self.mod.write_record({
+            "id": f"agy-{pid}",
+            "harness": "agy",
+            "pid": pid,
+            "cwd": "/work/demo",
+            "title": "demo",
+            "status": "waiting",
+            "activity": "idle",
+            "window": "0xabc",
+            "source": "hook",
+        })
+        originals = (self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of)
+        self.mod.iter_pids = lambda: [pid]
+        self.mod.harness_of = lambda candidate: "agy" if candidate == pid else None
+        self.mod.cwd_of = lambda _candidate: "/work/demo"
+        try:
+            self.assertEqual(self.mod.cmd_scan(["scan"]), 0)
+        finally:
+            self.mod.iter_pids, self.mod.harness_of, self.mod.cwd_of = originals
+        self.assertEqual(self.record(f"agy-{pid}")["window"], "0xabc")
 
     def test_agy_gc_keeps_presence_until_a_hook_exists(self):
         pid = os.getpid()
@@ -1550,6 +1600,7 @@ class DashbotsTest(unittest.TestCase):
         (src / "LICENSE").write_text("mit\n", encoding="utf-8")
         (src / "preview.png").write_bytes(b"png")
         (src / "config").write_text("swingMs 2000\n", encoding="utf-8")
+        (src / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         (src / "adapters").mkdir()
         (src / "adapters" / "grok").write_text("#!/bin/sh\n", encoding="utf-8")
         (src / "systemd").mkdir()
@@ -1567,6 +1618,7 @@ class DashbotsTest(unittest.TestCase):
         try:
             self.mod.copy_plugin()
             self.assertTrue((dst / "manifest.json").is_file())
+            self.assertTrue((dst / "install.sh").is_file())
             self.assertTrue((dst / "plugin" / "BarWidget.qml").is_file())
             self.assertTrue((dst / "plugin" / "icons" / "botvaders" / "imp.svg").is_file())
             self.assertTrue((dst / "config").is_file())
@@ -1621,6 +1673,30 @@ class DashbotsTest(unittest.TestCase):
             self.mod.plugin_dir = real_plugin
         self.assertFalse(legacy.exists())
         self.assertTrue((installed / "manifest.json").is_file())
+
+
+class InstallShTest(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(__file__).resolve().parents[1] / "install.sh"
+
+    def test_syntax(self):
+        result = subprocess.run(
+            ["bash", "-n", str(self.path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wraps_the_two_commands(self):
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn("omarchy plugin add", text)
+        self.assertIn("io.github.dayruke.dashbots", text)
+        self.assertIn("dashbots install", text)
+        self.assertIn("id -u", text)
+        self.assertIn('"$PLUGIN_DIR/.git"', text)
+        self.assertIn('"$HOME/.config/omarchy/plugins/', text)
+        self.assertNotRegex(text, r"(^|[^\w-])sudo([^\w-]|$)")
 
 
 if __name__ == "__main__":

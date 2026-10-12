@@ -665,6 +665,27 @@ def find_ancestor(harness, start_pid):
     return None
 
 
+def daemon_hosted(pid):
+    """A Claude session the Claude daemon runs with no terminal of its own.
+
+    It sits under a `claude bg-pty-host` or `claude daemon` process. When the
+    terminal that started it exits, the daemon is reparented and the session
+    has no window to focus.
+    """
+    try:
+        pid = ppid_of(int(pid))
+    except (TypeError, ValueError):
+        return False
+    seen = set()
+    while pid and pid > 1 and pid not in seen and len(seen) < 40:
+        seen.add(pid)
+        args = cmdline(pid)
+        if "--bg-pty-host" in args or args[1:2] in (["bg-pty-host"], ["daemon"]):
+            return True
+        pid = ppid_of(pid)
+    return False
+
+
 def hook_pid(harness):
     if os.environ.get("DASHBOTS_HOOK_ASSUME") == "1":
         raw = os.environ.get("DASHBOTS_HOOK_PID") or str(os.getpid())
@@ -1046,6 +1067,10 @@ def apply_hook(payload, harness):
     if harness == "agy":
         return apply_agy(payload, pid)
     session_id = session_id_of(payload)
+    if harness == "claude" and daemon_hosted(pid):
+        if session_id:
+            delete_record(session_id)
+        return 0
     name = event_name(payload)
     if name == "SessionEnd":
         if session_id:
@@ -1144,11 +1169,9 @@ def live_records():
     for record in iter_records():
         if pid_alive(record.get("pid")):
             found.append(record)
-    # Newest session first. A status change does not change this order.
-    found.sort(
-        key=lambda item: (slot_stamp(item), str(item.get("id") or "")),
-        reverse=True,
-    )
+    # Oldest session first, so a new mark is added on the right. A status
+    # change does not change this order.
+    found.sort(key=lambda item: (slot_stamp(item), str(item.get("id") or "")))
     return found
 
 
@@ -1314,6 +1337,8 @@ def cmd_gc(_argv=None):
         if not session_id:
             continue
         drop = not pid_alive(record.get("pid")) or session_id in stale_ids
+        if not drop and sanitize_harness(record.get("harness")) == "claude":
+            drop = daemon_hosted(record.get("pid"))
         if record.get("source") == "scan" and has_marker(record.get("harness")):
             harness = sanitize_harness(record.get("harness"))
             try:
@@ -1337,9 +1362,13 @@ def has_marker(harness):
 
 
 def _refresh_presence(record, cwd, window):
-    """Update the window and directory. Leave status and activity alone."""
+    """Update the window and directory. Leave status and activity alone.
+
+    A failed window lookup keeps the address a hook already wrote.
+    """
     title = title_of(cwd, record.get("harness"))
     cwd = cwd or ""
+    window = window or str(record.get("window") or "")
     if record.get("cwd") == cwd and record.get("title") == title and record.get("window") == window:
         return
     updated = dict(record)
@@ -2010,7 +2039,7 @@ def sync_icons(source, destination):
             pass
 
 
-CLONE_FILES = ("manifest.json", "README.md", "LICENSE", "preview.png", "config")
+CLONE_FILES = ("manifest.json", "README.md", "LICENSE", "preview.png", "config", "install.sh")
 CLONE_DIRS = ("bin", "adapters", "systemd")
 SKIP_COPY_DIRS = {".git", "tests", "__pycache__"}
 
@@ -2378,6 +2407,12 @@ def install_units():
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=20)
     subprocess.run(
         ["systemctl", "--user", "enable", "--now", "dashbots.path"],
+        check=False,
+        timeout=20,
+    )
+    # A watcher already running keeps the old code until it restarts.
+    subprocess.run(
+        ["systemctl", "--user", "try-restart", "dashbots.service"],
         check=False,
         timeout=20,
     )
