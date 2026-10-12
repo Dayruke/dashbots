@@ -1600,6 +1600,7 @@ class DashbotsTest(unittest.TestCase):
         (src / "LICENSE").write_text("mit\n", encoding="utf-8")
         (src / "preview.png").write_bytes(b"png")
         (src / "config").write_text("swingMs 2000\n", encoding="utf-8")
+        (src / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         (src / "adapters").mkdir()
         (src / "adapters" / "grok").write_text("#!/bin/sh\n", encoding="utf-8")
         (src / "systemd").mkdir()
@@ -1617,6 +1618,7 @@ class DashbotsTest(unittest.TestCase):
         try:
             self.mod.copy_plugin()
             self.assertTrue((dst / "manifest.json").is_file())
+            self.assertTrue((dst / "install.sh").is_file())
             self.assertTrue((dst / "plugin" / "BarWidget.qml").is_file())
             self.assertTrue((dst / "plugin" / "icons" / "botvaders" / "imp.svg").is_file())
             self.assertTrue((dst / "config").is_file())
@@ -1671,6 +1673,30 @@ class DashbotsTest(unittest.TestCase):
             self.mod.plugin_dir = real_plugin
         self.assertFalse(legacy.exists())
         self.assertTrue((installed / "manifest.json").is_file())
+
+
+class InstallShTest(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(__file__).resolve().parents[1] / "install.sh"
+
+    def test_syntax(self):
+        result = subprocess.run(
+            ["bash", "-n", str(self.path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wraps_the_two_commands(self):
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn("omarchy plugin add", text)
+        self.assertIn("io.github.dayruke.dashbots", text)
+        self.assertIn("dashbots install", text)
+        self.assertIn("id -u", text)
+        self.assertIn('"$PLUGIN_DIR/.git"', text)
+        self.assertIn('"$HOME/.config/omarchy/plugins/', text)
+        self.assertNotRegex(text, r"(^|[^\w-])sudo([^\w-]|$)")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,14 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/Dayruke/dashbots/main/install.sh | bash
+```
+
+That is the two steps below. [install.sh](install.sh) is the script the pipe runs. No extra packages. Nothing runs as root. A later run updates the checkout and runs `dashbots install` again.
+
+The same two steps by hand, which is also what the plugin store documents:
+
+```sh
 omarchy plugin add https://github.com/Dayruke/dashbots.git --enable
 ~/.config/omarchy/plugins/io.github.dayruke.dashbots/bin/dashbots install
 ```

@@ -2039,7 +2039,7 @@ def sync_icons(source, destination):
             pass
 
 
-CLONE_FILES = ("manifest.json", "README.md", "LICENSE", "preview.png", "config")
+CLONE_FILES = ("manifest.json", "README.md", "LICENSE", "preview.png", "config", "install.sh")
 CLONE_DIRS = ("bin", "adapters", "systemd")
 SKIP_COPY_DIRS = {".git", "tests", "__pycache__"}
 
