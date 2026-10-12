@@ -18,9 +18,9 @@ One icon per live session. Designed for Omarchy and its lovely theming.
 curl -fsSL https://raw.githubusercontent.com/Dayruke/dashbots/main/install.sh | bash
 ```
 
-That is the two steps below. [install.sh](install.sh) is the script the pipe runs. No extra packages. Nothing runs as root. A later run updates the checkout and runs `dashbots install` again.
+[install.sh](install.sh) does both steps below. No extra packages. Nothing runs as root. A pipe has no terminal, so the script passes `--yes` and Omarchy does not stop to confirm.
 
-The same two steps by hand, which is also what the plugin store documents:
+By hand, which is also what the plugin store documents:
 
 ```sh
 omarchy plugin add https://github.com/Dayruke/dashbots.git --enable
@@ -28,6 +28,8 @@ omarchy plugin add https://github.com/Dayruke/dashbots.git --enable
 ```
 
 `omarchy plugin add` clones the repo into `~/.config/omarchy/plugins/io.github.dayruke.dashbots/`. `dashbots install` links `~/.local/bin/dashbots` and writes the harness hooks, the user units, the menu row, and the bar slot. Loading the widget does not write those files.
+
+Run the one-liner again to update. When that directory is a git checkout, the script fast-forwards it, then runs `dashbots install`. When it is not a git checkout, the files stay and `dashbots install` still runs. From a clone of this repo, `./install.sh` is the same installer and keeps Omarchy's confirm prompt.
 
 The bar config is `$XDG_CONFIG_HOME/dashbots/config` (when `XDG_CONFIG_HOME` is unset, `~/.config/dashbots/config`). Install writes that file. When the file is already there, install rewrites it from the current template and keeps values that are set: `swingMs`, `animate`, `place`, and `icons`. A value this version no longer accepts is left out. A key the file does not set takes the new default. Saving the file applies it. If the bar does not pick the save up, run `omarchy restart shell`.
 
