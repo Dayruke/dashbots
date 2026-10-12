@@ -2328,14 +2328,53 @@ def enable_command(layout, place):
     return command
 
 
+def backup_file(path):
+    """Copy `path` to `path.bak.<stamp>` without widening its mode.
+
+    shutil.copy creates the new file under the umask, then copies the source
+    mode. With umask 022 a 0600 shell.json is briefly 0644, and another local
+    account can open it. Restoring 0600 does not close that descriptor.
+    Create the backup at 0600, apply the source mode, then write the bytes.
+    """
+    mode = os.stat(path).st_mode & 0o777
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    for attempt in range(100):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        destination = f"{path}.bak.{stamp}{suffix}"
+        try:
+            fd = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        try:
+            os.fchmod(fd, mode)
+            with open(path, "rb") as source, os.fdopen(fd, "wb") as handle:
+                fd = None
+                shutil.copyfileobj(source, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            if fd is not None:
+                os.close(fd)
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+            raise
+        return destination
+    raise OSError(f"could not back up {path}")
+
+
 def write_placed(config, place):
     path = shell_json_path()
     layout = bar_layout(config)
     if not move_slot(layout, place):
         return 0
     if os.path.exists(path):
-        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        shutil.copy(path, f"{path}.bak.{stamp}")
+        backup_file(path)
     write_json(path, config)
     return 0
 
@@ -2740,8 +2779,7 @@ def strip_bar_ids(plugin_ids):
             changed = True
     if not changed:
         return
-    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    shutil.copy(path, f"{path}.bak.{stamp}")
+    backup_file(path)
     write_json(path, config)
 
 

@@ -1580,6 +1580,71 @@ class DashbotsTest(unittest.TestCase):
         center = json.loads(shell.read_text(encoding="utf-8"))["bar"]["layout"]["center"]
         self.assertEqual([entry["id"] for entry in center], ["omarchy.weather"])
 
+    def test_shell_backup_keeps_its_mode_before_the_bytes(self):
+        shell = Path(self.tmp.name) / "shell.json"
+        payload = b'{"bar":{"layout":{"center":[]}},"token":"secret"}\n'
+        shell.write_bytes(payload)
+        os.chmod(shell, 0o600)
+        seen = []
+        real = self.mod.shutil.copyfileobj
+
+        def spy(src, dst, length=0):
+            info = os.fstat(dst.fileno())
+            seen.append((info.st_mode & 0o777, info.st_size))
+            return real(src, dst, length)
+
+        self.mod.shutil.copyfileobj = spy
+        old_mask = os.umask(0o022)
+        try:
+            private = Path(self.mod.backup_file(str(shell)))
+            os.chmod(shell, 0o664)
+            shared = Path(self.mod.backup_file(str(shell)))
+        finally:
+            os.umask(old_mask)
+            self.mod.shutil.copyfileobj = real
+        self.assertEqual(seen, [(0o600, 0), (0o664, 0)])
+        self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(private.read_bytes(), payload)
+        self.assertEqual(shared.stat().st_mode & 0o777, 0o664)
+        self.assertEqual(shared.read_bytes(), payload)
+        self.assertNotEqual(private.name, shared.name)
+
+        os.chmod(shell, 0o600)
+        shell.write_text(json.dumps({
+            "bar": {"layout": {
+                "left": [],
+                "center": [{"id": self.mod.LEGACY_PLUGIN_ID}],
+                "right": [],
+            }},
+        }), encoding="utf-8")
+        os.environ["DASHBOTS_SHELL_FILE"] = str(shell)
+        before = set(Path(self.tmp.name).glob("shell.json.bak.*"))
+        old_mask = os.umask(0o022)
+        try:
+            self.mod.strip_bar_ids((self.mod.LEGACY_PLUGIN_ID,))
+        finally:
+            os.umask(old_mask)
+        created = set(Path(self.tmp.name).glob("shell.json.bak.*")) - before
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created.pop().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(
+            json.loads(shell.read_text(encoding="utf-8"))["bar"]["layout"]["center"],
+            [],
+        )
+
+        config = Path(self.tmp.name) / "config"
+        os.environ["DASHBOTS_CONFIG"] = str(config)
+        config.write_text("place center-right\n", encoding="utf-8")
+        before = set(Path(self.tmp.name).glob("shell.json.bak.*"))
+        old_mask = os.umask(0o022)
+        try:
+            self.assertEqual(self.mod.cmd_place(["place"]), 0)
+        finally:
+            os.umask(old_mask)
+        created = set(Path(self.tmp.name).glob("shell.json.bak.*")) - before
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created.pop().stat().st_mode & 0o777, 0o600)
+
     def test_enable_command_uses_the_plugin_id(self):
         command = self.mod.enable_command({"center": [{"id": "omarchy.weather"}]}, "center-right")
         self.assertEqual(command[3], self.mod.PLUGIN_ID)
