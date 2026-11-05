@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dayruke.dashbots",
   "name": "Dashbots",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Dayruke",
   "license": "MIT",
   "description": "One bar mark per live agent session",
