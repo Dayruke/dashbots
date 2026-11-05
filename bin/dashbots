@@ -163,18 +163,27 @@ def config_path():
     return os.path.join(base, "dashbots", "config")
 
 
-# center-left is just left of the clock and weather.
-# center-right is just right of the weather. That is the default.
+# center-left is just left of the clock, in the section that hangs off the
+# clock's left edge, so the clock stays centered.
+# center-right is just right of the world clock and weather, in the section
+# that hangs off the clock's right edge, so the clock stays centered. That is
+# the default.
 # left is just right of the workspace listing.
 # right is just right of the tray. The bar keeps the tray at the inner
 # edge of that side, so the marks sit beside the chevron.
 # Each value is section, anchors in preference order, and which side of the anchor.
 PLACES = {
-    "center-left": ("center", ("omarchy.clock", "omarchy.weather"), "before"),
-    "center-right": ("center", ("omarchy.weather", "omarchy.clock"), "after"),
+    "center-left": ("centerBegin", (), "after"),
+    "center-right": ("centerEnd", ("omarchy.weather", "omarchy.elsewhen"), "after"),
     "left": ("left", ("omarchy.workspaces",), "after"),
     "right": ("right", ("omarchy.tray",), "after"),
 }
+# A layout from before Omarchy split the center section has neither edge section.
+UNSPLIT_PLACES = {
+    "center-left": ("center", ("omarchy.clock", "omarchy.weather"), "before"),
+    "center-right": ("center", ("omarchy.weather", "omarchy.clock"), "after"),
+}
+BAR_SECTIONS = ("left", "centerBegin", "center", "centerEnd", "right", "tray")
 
 
 def default_config_text():
@@ -2217,7 +2226,7 @@ def bar_has_id(plugin_id, config=None):
     if config is None:
         config = load_json_object(shell_json_path()) or {}
     layout = ((config.get("bar") or {}).get("layout") or {})
-    for section in ("left", "center", "right"):
+    for section in BAR_SECTIONS:
         for entry in layout.get(section) or []:
             if isinstance(entry, dict) and entry.get("id") == plugin_id:
                 return True
@@ -2231,9 +2240,9 @@ def bar_has_dashbots(config=None):
 def bar_layout(config):
     bar = config.setdefault("bar", {})
     layout = bar.setdefault("layout", {})
-    for section in ("left", "center", "right"):
-        entries = layout.get(section)
-        if not isinstance(entries, list):
+    for section in BAR_SECTIONS:
+        required = section in ("left", "center", "right")
+        if (required or section in layout) and not isinstance(layout.get(section), list):
             layout[section] = []
     return layout
 
@@ -2246,9 +2255,11 @@ def anchor_index(entries, anchors):
     return None
 
 
-def place_spec(place):
+def place_spec(place, layout):
     if place not in PLACES:
         place = "center-right"
+    if place in UNSPLIT_PLACES and "centerBegin" not in layout and "centerEnd" not in layout:
+        return UNSPLIT_PLACES[place]
     return PLACES[place]
 
 
@@ -2260,9 +2271,9 @@ def chosen_anchor(entries, anchors):
 
 
 def placed_correctly(layout, place):
-    section, anchors, side = place_spec(place)
+    section, anchors, side = place_spec(place, layout)
     found = []
-    for name in ("left", "center", "right"):
+    for name in BAR_SECTIONS:
         entries = layout.get(name) or []
         for index, entry in enumerate(entries):
             if isinstance(entry, dict) and entry.get("id") == PLUGIN_ID:
@@ -2283,16 +2294,18 @@ def placed_correctly(layout, place):
 
 def move_slot(layout, place):
     """Put the slot where `place` says. Return whether the layout changed."""
-    section, anchors, side = place_spec(place)
+    section, anchors, side = place_spec(place, layout)
     if placed_correctly(layout, place if place in PLACES else "center-right"):
         return False
-    for name in ("left", "center", "right"):
+    for name in BAR_SECTIONS:
+        if name not in layout:
+            continue
         entries = layout.get(name) or []
         layout[name] = [
             entry for entry in entries
             if not (isinstance(entry, dict) and entry.get("id") == PLUGIN_ID)
         ]
-    entries = layout[section]
+    entries = layout.setdefault(section, [])
     anchor_name = chosen_anchor(entries, anchors)
     anchor = anchor_index(entries, (anchor_name,)) if anchor_name else None
     slot = {"id": PLUGIN_ID}
@@ -2309,7 +2322,7 @@ def move_slot(layout, place):
 
 
 def enable_command(layout, place):
-    section, anchors, side = place_spec(place)
+    section, anchors, side = place_spec(place, layout)
     entries = layout.get(section) or []
     chosen = chosen_anchor(entries, anchors)
     command = ["omarchy", "plugin", "enable", PLUGIN_ID, "--section", section]
@@ -2766,7 +2779,7 @@ def strip_bar_ids(plugin_ids):
         return
     layout = ((config.get("bar") or {}).get("layout") or {})
     changed = False
-    for section in ("left", "center", "right"):
+    for section in BAR_SECTIONS:
         entries = layout.get(section)
         if not isinstance(entries, list):
             continue

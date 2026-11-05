@@ -1561,6 +1561,90 @@ class DashbotsTest(unittest.TestCase):
             ["omarchy.indicators", slot],
         )
 
+    def test_center_right_sits_after_the_weather_in_center_end(self):
+        slot = self.mod.PLUGIN_ID
+        layout = {
+            "left": [],
+            "centerBegin": [{"id": "omarchy.indicators"}],
+            "center": [{"id": "omarchy.clock"}, {"id": slot}],
+            "centerEnd": [
+                {"id": "omarchy.elsewhen"},
+                {"id": "omarchy.weather"},
+                {"id": "omarchy.system-update"},
+            ],
+            "right": [],
+        }
+        self.assertFalse(self.mod.placed_correctly(layout, "center-right"))
+        self.assertEqual(
+            self.mod.enable_command(layout, "center-right")[4:],
+            ["--section", "centerEnd", "--after", "omarchy.weather"],
+        )
+        self.assertTrue(self.mod.move_slot(layout, "center-right"))
+        self.assertEqual([entry["id"] for entry in layout["center"]], ["omarchy.clock"])
+        self.assertEqual(
+            [entry["id"] for entry in layout["centerEnd"]],
+            ["omarchy.elsewhen", "omarchy.weather", slot, "omarchy.system-update"],
+        )
+        self.assertTrue(self.mod.placed_correctly(layout, "center-right"))
+        self.assertFalse(self.mod.move_slot(layout, "center-right"))
+        self.assertTrue(self.mod.bar_has_dashbots({"bar": {"layout": layout}}))
+
+        no_weather = {"center": [], "centerEnd": [{"id": "omarchy.elsewhen"}, {"id": "omarchy.system-update"}]}
+        self.mod.move_slot(no_weather, "center-right")
+        self.assertEqual(
+            [entry["id"] for entry in no_weather["centerEnd"]],
+            ["omarchy.elsewhen", slot, "omarchy.system-update"],
+        )
+
+        self.assertTrue(self.mod.move_slot(layout, "left"))
+        self.assertEqual(
+            [entry["id"] for entry in layout["centerEnd"]],
+            ["omarchy.elsewhen", "omarchy.weather", "omarchy.system-update"],
+        )
+        self.assertEqual([entry["id"] for entry in layout["left"]], [slot])
+
+    def test_center_left_sits_beside_the_clock_in_center_begin(self):
+        slot = self.mod.PLUGIN_ID
+        layout = {
+            "left": [],
+            "centerBegin": [{"id": "omarchy.indicators"}],
+            "center": [{"id": "omarchy.clock"}],
+            "centerEnd": [{"id": "omarchy.weather"}, {"id": slot}],
+            "right": [],
+        }
+        self.assertEqual(
+            self.mod.enable_command(layout, "center-left")[4:],
+            ["--section", "centerBegin", "--index", "1"],
+        )
+        self.assertTrue(self.mod.move_slot(layout, "center-left"))
+        self.assertEqual(
+            [entry["id"] for entry in layout["centerBegin"]],
+            ["omarchy.indicators", slot],
+        )
+        self.assertEqual([entry["id"] for entry in layout["center"]], ["omarchy.clock"])
+        self.assertEqual([entry["id"] for entry in layout["centerEnd"]], ["omarchy.weather"])
+        self.assertFalse(self.mod.move_slot(layout, "center-left"))
+
+        only_end = {"center": [{"id": "omarchy.clock"}], "centerEnd": []}
+        self.assertTrue(self.mod.move_slot(only_end, "center-left"))
+        self.assertEqual([entry["id"] for entry in only_end["centerBegin"]], [slot])
+
+    def test_strip_bar_ids_clears_center_end(self):
+        slot = self.mod.PLUGIN_ID
+        shell = Path(self.tmp.name) / "shell.json"
+        shell.write_text(json.dumps({
+            "bar": {"layout": {
+                "left": [],
+                "center": [],
+                "centerEnd": [{"id": "omarchy.weather"}, {"id": slot}],
+                "right": [],
+            }},
+        }), encoding="utf-8")
+        os.environ["DASHBOTS_SHELL_FILE"] = str(shell)
+        self.mod.strip_bar_ids((slot,))
+        layout = json.loads(shell.read_text(encoding="utf-8"))["bar"]["layout"]
+        self.assertEqual([entry["id"] for entry in layout["centerEnd"]], ["omarchy.weather"])
+
     def test_strip_bar_ids_drops_the_legacy_slot(self):
         slot = self.mod.PLUGIN_ID
         legacy = self.mod.LEGACY_PLUGIN_ID
